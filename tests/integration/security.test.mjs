@@ -20,8 +20,8 @@ async function req(base, path, { method = 'GET', body, cookie, headers = {} } = 
 const cookieOf = res => (res.headers.get('set-cookie') || '').split(';')[0];
 
 async function boot(opts = {}) {
-  const app = createApp({ dbPath: ':memory:', loginMaxFailures: 5, ...opts });
-  for (const [username, role, plant] of [['ceo', 'ceo', 'all'], ['khi.dept', 'dept', 'KHI'], ['victim', 'dept', 'KHI'], ['racer', 'dept', 'KHI'], ['pwguess', 'dept', 'KHI']]) {
+  const app = await createApp({ dbPath: ':memory:', loginMaxFailures: 5, ...opts });
+  for (const [username, role, plant] of [['ceo', 'ceo', 'all'], ['khi.dept', 'dept', 'KHI'], ['victim', 'dept', 'KHI'], ['v6victim', 'dept', 'KHI'], ['mapped', 'dept', 'KHI'], ['natuser', 'dept', 'KHI'], ['racer', 'dept', 'KHI'], ['pwguess', 'dept', 'KHI']]) {
     await app.users.create({ username, displayName: username, role, plant, password: PW });
   }
   const base = await app.listen(0);
@@ -43,9 +43,31 @@ describe('security hardening (review findings)', () => {
       }
       assert.equal(last.status, 429);
     });
+    it('counts every address in one IPv6 /64 as one client, so rotating addresses cannot bypass the lockout', async () => {
+      let last;
+      for (let i = 1; i <= 7; i++) {
+        last = await req(t.base, '/api/login', { method: 'POST', body: { username: 'v6victim', password: 'wrong wrong wrong' }, headers: { 'x-forwarded-for': `2001:db8:1:2::${i.toString(16)}` } });
+      }
+      assert.equal(last.status, 429);
+    });
+    it('treats an IPv4-mapped IPv6 address and the plain IPv4 address as the same client', async () => {
+      const statuses = [];
+      for (let i = 0; i < 6; i++) {
+        const ip = i % 2 ? '198.51.100.9' : '::ffff:198.51.100.9';
+        statuses.push((await req(t.base, '/api/login', { method: 'POST', body: { username: 'mapped', password: 'wrong wrong wrong' }, headers: { 'x-forwarded-for': ip } })).status);
+      }
+      assert.deepEqual(statuses, [401, 401, 401, 401, 401, 429]);
+    });
+    it("a victim's successful sign-in does not reset an attacker's guesses from the same (NAT) address", async () => {
+      const from = { 'x-forwarded-for': '192.0.2.44' };
+      for (let i = 0; i < 4; i++) assert.equal((await req(t.base, '/api/login', { method: 'POST', body: { username: 'natuser', password: 'wrong wrong wrong' }, headers: from })).status, 401);
+      assert.equal((await req(t.base, '/api/login', { method: 'POST', body: { username: 'natuser', password: PW }, headers: from })).status, 200);
+      assert.equal((await req(t.base, '/api/login', { method: 'POST', body: { username: 'natuser', password: 'wrong wrong wrong' }, headers: from })).status, 401);
+      assert.equal((await req(t.base, '/api/login', { method: 'POST', body: { username: 'natuser', password: PW }, headers: from })).status, 429, 'the fifth failure locks the account for this address');
+    });
     it('records a bounded, valid IP in the audit log, never the raw header', async () => {
       await req(t.base, '/api/login', { method: 'POST', body: { username: 'ceo', password: 'nope nope nope' }, headers: { 'x-forwarded-for': `${'x'.repeat(5000)}, not-an-ip` } });
-      const rows = t.app.db.prepare("SELECT detail FROM audit_log WHERE action = 'auth.login_failed'").all();
+      const rows = await t.app.db.all("SELECT detail FROM audit_log WHERE action = 'auth.login_failed'");
       for (const r of rows) assert.ok(r.detail.length < 400, 'audit detail must stay small');
     });
   });
@@ -63,7 +85,7 @@ describe('security hardening (review findings)', () => {
     });
     it('never writes the typed text of an unknown username into the audit log', async () => {
       await req(t.base, '/api/login', { method: 'POST', body: { username: 'MySecretPass123', password: 'whatever whatever' } });
-      const all = t.app.db.prepare('SELECT detail FROM audit_log').all().map(r => r.detail).join('\n');
+      const all = (await t.app.db.all('SELECT detail FROM audit_log')).map(r => r.detail).join('\n');
       assert.doesNotMatch(all, /MySecretPass123/);
     });
     it('shows the audit log only to audit roles (state, action responses and /api/audit)', async () => {

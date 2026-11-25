@@ -6,13 +6,14 @@ A root-cause dashboard for large textile groups. It has two parts:
 - A backend in `server/`. It handles sign-in, enforces the 8D corrective-action workflow, keeps a tamper-evident audit trail, and takes KPI readings from your ERP/MES.
 - **Ground-truth measurement.** Department staff enter shift, daily, event and month-end records on 16 forms. A different person approves each one, and every KPI is calculated only from approved records. A KPI without records shows **Not measured**, never a demo number. Gaps are explained with control charts, trend tests, Welch t-tests and Pareto analysis, and costed in PKR at finance's own cost rates. No AI model is involved: the calculations are deterministic and statistical.
 
-The backend uses **Node.js built-ins only** (`node:http`, `node:sqlite`, `node:crypto`) and has **zero npm dependencies**.
+The backend uses Node.js built-ins plus one dependency, the official libSQL client (`@libsql/client`). The same SQLite engine runs as a local file in development and as a hosted **Turso** database on **Vercel**. It can run as a long-lived Node server or as a Vercel function.
 
 ## Quick start (local)
 
 ```powershell
 node --version          # needs 22.13 or newer
-npm test                # 292 tests: 222 unit + 70 integration (API, security, records)
+npm install             # one dependency: @libsql/client
+npm test                # 330 tests: 227 unit + 103 integration (API, security, records, database, multi-instance, Vercel entry)
 npm run user:create -- --username ayesha --name "Ayesha Khan" --role ceo --plant all
 npm run dev             # http://127.0.0.1:5174 using dev.env (database in data/dev.db)
 ```
@@ -118,13 +119,55 @@ POST /api/kpis/ingest      {"source":"SAP ERP","records":[
 | `GET /api/measured?plant=all\|FSD\|KHI\|LHR\|GRP&period=m\|q\|y` | ceo, plant, dept, finance, admin | KPIs, coverage and ranked findings with evidence, from approved records only. Plant-scoped users default to their own plant; any other plant gets `403` |
 | `GET /api/kpis` | ceo, plant, dept, finance, admin | latest feed values |
 | `POST /api/kpis/ingest` | integration, admin | see above |
-| `GET /healthz` | anyone | `{"ok":true,"db":true}`, or `503` if the database is unreachable |
+| `GET /api/health` (also `/healthz`) | anyone | `{"ok":true,"db":true}`, or `503` if the database is unreachable |
 
 All writes need `Content-Type: application/json`. Browser requests must come from `PUBLIC_ORIGIN`.
 
-## Production deployment
+## Deploying free on Vercel + Turso
 
-1. Install Node 22.13+ on the server. Copy the repo (no `npm install` needed).
+Vercel serves the dashboard from its CDN and runs the API as a function (`api/index.js`). Vercel keeps no files between requests, so the data lives in a hosted Turso database. Several Vercel instances can run at once; sessions, sign-in lockouts and the measured-KPI cache version are all kept in the database, so the instances always agree.
+
+1. **Create the database (Turso, free plan).** Sign up at turso.tech, then in the Turso dashboard (or with the `turso` CLI) create a database. Put it in the same region as your Vercel functions (Vercel → Settings → Functions → *Function Region*; the default is Washington, D.C., `iad1`). For users in Pakistan, pick Mumbai on both sides if both offer it. Copy two values:
+   - the database URL, which looks like `libsql://textile-audit-yourname.turso.io`
+   - an auth token: Database → *Create token* (read & write), or `turso db tokens create textile-audit`. Treat the token like a password.
+2. **Set the Vercel environment variables.** Vercel project → Settings → Environment Variables. Tick **Production only**: a Preview deployment (every pushed branch) given the same values would read and write the live database.
+
+   | Name | Value |
+   |---|---|
+   | `DB_URL` | the `libsql://…` URL |
+   | `DB_AUTH_TOKEN` | the token (mark it *Sensitive*) |
+   | `NODE_ENV` | `production` |
+   | `PUBLIC_ORIGIN` | your site address exactly, e.g. `https://audit-system-theta.vercel.app` |
+   | `TRUST_PROXY` | `true` (Vercel sets the visitor's IP in `X-Forwarded-For`). If you put another proxy or CDN such as Cloudflare in front of Vercel, the address Vercel sees is that proxy's, so every visitor shares one sign-in limit; don't add one without adjusting this. |
+
+3. **Deploy.** Push to the GitHub repository connected to Vercel, or press *Redeploy*. `vercel.json` already sets the build (`node scripts/build-static.js` → `public/`), the `/api/*` rewrite and the security headers. On its first request the API creates all the tables in Turso. If you deploy with the `vercel` CLI from this folder instead, `.vercelignore` keeps `data/`, `.env*`, tests and docs out of the upload.
+4. **Create the first users** from your own computer, against the Turso database. Put the two values in a file named `.env.turso` in the project folder. It is gitignored; never commit it.
+
+   ```text
+   DB_URL=libsql://textile-audit-yourname.turso.io
+   DB_AUTH_TOKEN=paste-the-token-here
+   ```
+
+   Then:
+
+   ```powershell
+   npm run user:remote -- create --username admin --name "Administrator" --role admin --plant all
+   npm run user:remote -- list
+   ```
+
+   Each `create` prints a strong one-time password. Passwords must be at least 12 characters.
+5. **Check.** Open `https://<your-site>/api/health`, which should show `{"ok":true,"db":true}`. Then sign in.
+   - `503` with "not configured correctly" means an environment variable is missing or wrong. Vercel → Deployments → *Functions* logs show which one.
+   - `404` on `/api/…` means the deployment does not include `api/index.js` and `vercel.json` yet.
+
+Things to know before relying on it:
+- **Vercel's free Hobby plan is for non-commercial use only** under Vercel's terms. A company's internal tool may count as commercial, which needs Vercel Pro. Turso's free plan has storage and monthly row-read/write limits; check turso.tech/pricing.
+- **Backups:** Turso keeps point-in-time history on its plans. For your own copies, use `turso db shell textile-audit .dump > backup.sql` regularly and keep them off Vercel.
+- **Latency:** every API call talks to Turso over the network, and a write takes a few round trips. Keep the database and the functions in one region (step 1). A write transaction that takes longer than 10 seconds (a stalled connection) is rolled back and the user sees an error, instead of blocking every other writer.
+
+## Production deployment (your own server)
+
+1. Install Node 22.13+ on the server. Copy the repo and run `npm ci`.
 2. Copy `.env.example` to `.env` and edit it. `PUBLIC_ORIGIN` must be the exact `https://` address users type. The server refuses to start in production without it.
 3. Create the first users with the CLI (above).
 4. Run under a service manager (systemd, NSSM or pm2) that restarts it on failure:
@@ -146,8 +189,8 @@ Keep backups off the server. Test a restore. After restoring, sign in as CEO and
 
 ### Known limits (read before scaling)
 
-- **One server process.** The sign-in rate limiter is in memory, and SQLite allows one writer at a time. That is fine for one group's management team (hundreds of users). Do not run several copies against one file. To go multi-node, move the repositories in `server/*.js` to PostgreSQL. All SQL lives there.
-- **`node:sqlite` is marked experimental** in Node 22. Pin the Node version you tested with.
+- **One writer at a time.** SQLite (local file or Turso) runs write transactions one after another. Each one is short, which is fine for one group's management team (hundreds of users). Several server processes or Vercel instances may share the database, because sessions, sign-in lockouts and the cache version live in it (tested with two processes on one file). With a local file, keep every process on the same machine. On Turso, a write transaction holds the lock for a few network round trips, so keep the database close to the functions.
+- **Turso announced it is joining Supabase (October 2026).** The code uses the open-source libSQL client and plain SQLite SQL, so it can move to self-hosted libSQL (`sqld`) or back to a local file on your own server without code changes.
 - **The audit hash chain is not keyed.** It detects edits made through the app or by anyone who doesn't recompute every later hash. Someone with direct write access to the database file could rebuild the chain. Protect the file with OS permissions, and copy the `head` hash from **Check audit integrity** somewhere they can't write (e.g. a weekly email to the auditor). A matching head later proves nothing was rewritten.
 - **No SSO/MFA yet.** Sign-in is username + password (scrypt-hashed). For internet-facing use, put the app behind your VPN or an identity-aware proxy, or add OIDC.
 - **KPI values come only from approved records** (or the machine feed). The 33 audit-playbook findings in `js/data.js`, with their PKR amounts and baselines, are still **estimates**. The dashboard labels them "baseline estimate, not measured" and shows each one's measured KPI next to it.
@@ -169,7 +212,12 @@ server/app.js               HTTP routes, auth, CSRF checks, security headers
 server/records.js           maker-checker department records
 server/measured.js          KPIs from approved records
 server/{actions,audit,kpis,users,security,db,http,config}.js
-server/cli/users.js         user administration
+server/db.js                async libSQL adapter: local SQLite file or Turso, migrations, transactions
+server/cli/users.js         user administration (npm run user:remote uses .env.turso)
+api/index.js                Vercel function entry (all /api/* requests)
+scripts/build-static.js     copies the dashboard into public/ for Vercel's CDN
+vercel.json                 Vercel build, rewrite and security headers
+.vercelignore               keeps data/, .env*, tests and docs out of a `vercel` CLI upload
 tests/unit, tests/integration
 docs/qa/quality-report.md   what was tested and what is still open
 ```

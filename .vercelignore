@@ -1,0 +1,14 @@
+# Never uploaded by `vercel deploy` from this folder (a Git deploy only sees committed files, which already
+# exclude data/ and .env files). The deployment needs only: api/, server/, js/, css/, index.html, scripts/,
+# package.json, package-lock.json and vercel.json.
+data/
+dev.env
+.env
+.env.*
+tests/
+docs/
+artifacts/
+public/
+.claude/
+.vercel/
+*.log

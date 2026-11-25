@@ -6,15 +6,14 @@
  * - Every step is written to the hash-chained audit log in the same transaction. */
 const M = require('../js/measure.js');
 const { HttpError } = require('./errors');
-const { tx } = require('./db');
 const audit = require('./audit');
 
 const STATUSES = ['submitted', 'approved', 'rejected', 'voided'];
 const DECISIONS = { approve: { from: 'submitted', to: 'approved' }, reject: { from: 'submitted', to: 'rejected' }, void: { from: 'approved', to: 'voided' } };
 const MAX_NOTE = 500;
+const GEN_KEY = 'records_generation';
 
 function makeRecords(db, clock) {
-  let generation = 0; // bumps whenever the set of approved records changes (approve / void); keys the measured cache
   const iso = () => new Date(clock()).toISOString();
   const today = () => iso().slice(0, 10);
   const inPlant = (user, plant) => user.plant === 'all' || user.plant === plant;
@@ -30,9 +29,9 @@ function makeRecords(db, clock) {
     canReview: !!user && row.status === 'submitted' && canReview(user, row),
     canVoid: !!user && row.status === 'approved' && canReview(user, row),
   });
-  const byId = id => db.prepare(`${SELECT} WHERE r.id = ?`).get(id);
+  const byId = id => db.get(`${SELECT} WHERE r.id = ?`, [id]);
 
-  function submit(user, body) {
+  async function submit(user, body) {
     const allowed = M.formsFor(user);
     if (!allowed.length) throw new HttpError(403, 'Your account cannot enter records. Ask an administrator to set your department.');
     const { errors, record } = M.validateRecord(body, today());
@@ -40,30 +39,30 @@ function makeRecords(db, clock) {
     if (!allowed.includes(record.type)) throw new HttpError(403, 'This form belongs to another department.');
     if (!inPlant(user, record.plant)) throw new HttpError(403, `You can only enter records for plant ${user.plant}.`);
 
-    const history = db.prepare("SELECT data FROM records WHERE type = ? AND plant = ? AND status = 'approved' ORDER BY date DESC, id DESC LIMIT 30")
-      .all(record.type, record.plant).map(r => JSON.parse(r.data));
+    const history = (await db.all("SELECT data FROM records WHERE type = ? AND plant = ? AND status = 'approved' ORDER BY date DESC, id DESC LIMIT 30",
+      [record.type, record.plant])).map(r => JSON.parse(r.data));
     const flags = M.outlierFlags(record.type, record.data, history);
     const now = iso();
     try {
-      const id = tx(db, () => {
-        const r = db.prepare('INSERT INTO records (type, plant, date, dkey, data, flags, status, submitted_by, submitted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-          .run(record.type, record.plant, record.date, record.dkey, JSON.stringify(record.data), JSON.stringify(flags), 'submitted', user.id, now);
+      const id = await db.tx(async t => {
+        const r = await t.run('INSERT INTO records (type, plant, date, dkey, data, flags, status, submitted_by, submitted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [record.type, record.plant, record.date, record.dkey, JSON.stringify(record.data), JSON.stringify(flags), 'submitted', user.id, now]);
         const newId = Number(r.lastInsertRowid);
-        audit.append(db, { ts: now, user, action: 'record.submit', target: `R${newId}`, detail: { type: record.type, plant: record.plant, date: record.date, flags: flags.length, msg: `${M.FORMS[record.type].label} for ${record.plant} on ${record.date} submitted` } });
+        await audit.append(t, { ts: now, user, action: 'record.submit', target: `R${newId}`, detail: { type: record.type, plant: record.plant, date: record.date, flags: flags.length, msg: `${M.FORMS[record.type].label} for ${record.plant} on ${record.date} submitted` } });
         return newId;
       });
-      return pub(byId(id), user);
+      return pub(await byId(id), user);
     } catch (e) {
       if (/UNIQUE constraint failed/.test(String(e.message))) {
-        const dup = db.prepare("SELECT id FROM records WHERE type = ? AND plant = ? AND dkey = ? AND status IN ('submitted','approved')").get(record.type, record.plant, record.dkey);
+        const dup = await db.get("SELECT id FROM records WHERE type = ? AND plant = ? AND dkey = ? AND status IN ('submitted','approved')", [record.type, record.plant, record.dkey]);
         throw new HttpError(409, `This was already entered (record R${dup ? dup.id : '?'}). If that one is wrong, ask your head to void it, then enter it again.`);
       }
       throw e;
     }
   }
 
-  function review(user, id, body) {
-    const row = byId(id);
+  async function review(user, id, body) {
+    const row = await byId(id);
     if (!row) throw new HttpError(404, 'No such record.');
     if (!M.reviewableForms(user).includes(row.type) || !inPlant(user, row.plant)) throw new HttpError(403, 'You cannot review this department\'s records.');
     if (row.submitted_by === user.id) throw new HttpError(403, 'You cannot review your own record. Another approver must check it.');
@@ -74,17 +73,18 @@ function makeRecords(db, clock) {
     const note = typeof body.note === 'string' ? body.note.trim().slice(0, MAX_NOTE) : '';
     if (body.decision !== 'approve' && note.length < 3) throw new HttpError(422, 'Give a reason (at least 3 characters).');
     const now = iso();
-    tx(db, () => {
-      const r = db.prepare('UPDATE records SET status = ?, reviewed_by = ?, reviewed_at = ?, review_note = ?, version = version + 1 WHERE id = ? AND version = ?')
-        .run(d.to, user.id, now, note || null, id, row.version);
+    await db.tx(async t => {
+      const r = await t.run('UPDATE records SET status = ?, reviewed_by = ?, reviewed_at = ?, review_note = ?, version = version + 1 WHERE id = ? AND version = ?',
+        [d.to, user.id, now, note || null, id, row.version]);
       if (r.changes !== 1) throw new HttpError(409, 'Someone else changed this record. Reload and try again.');
-      audit.append(db, { ts: now, user, action: `record.${body.decision}`, target: `R${id}`, detail: { type: row.type, plant: row.plant, date: row.date, note: note || undefined, msg: `${M.FORMS[row.type] ? M.FORMS[row.type].label : row.type} R${id} ${d.to}${note ? `: ${note}` : ''}` } });
+      // The approved set changed: bump the shared counter that keys every instance's measured cache.
+      if (body.decision !== 'reject') await t.run('INSERT INTO meta (k, v) VALUES (?, 1) ON CONFLICT(k) DO UPDATE SET v = v + 1', [GEN_KEY]);
+      await audit.append(t, { ts: now, user, action: `record.${body.decision}`, target: `R${id}`, detail: { type: row.type, plant: row.plant, date: row.date, note: note || undefined, msg: `${M.FORMS[row.type] ? M.FORMS[row.type].label : row.type} R${id} ${d.to}${note ? `: ${note}` : ''}` } });
     });
-    if (body.decision !== 'reject') generation++;
-    return pub(byId(id), user);
+    return pub(await byId(id), user);
   }
 
-  function list(user, query) {
+  async function list(user, query) {
     const scope = query.get('scope') || 'mine';
     const status = query.get('status');
     const type = query.get('type');
@@ -102,25 +102,28 @@ function makeRecords(db, clock) {
     }
     if (status) { where.push('r.status = ?'); args.push(status); }
     if (type) { where.push('r.type = ?'); args.push(type); }
-    return db.prepare(`${SELECT} WHERE ${where.join(' AND ')} ORDER BY r.date DESC, r.id DESC LIMIT ?`).all(...args, limit).map(r => pub(r, user));
+    return (await db.all(`${SELECT} WHERE ${where.join(' AND ')} ORDER BY r.date DESC, r.id DESC LIMIT ?`, [...args, limit])).map(r => pub(r, user));
   }
 
   /** Approved records for KPI computation: the period window plus all cost rates (standing figures). */
-  function approvedSince(from) {
-    return db.prepare("SELECT id, type, plant, date, data FROM records WHERE status = 'approved' AND (date >= ? OR type = 'cost_rates')").all(from)
+  async function approvedSince(from) {
+    return (await db.all("SELECT id, type, plant, date, data FROM records WHERE status = 'approved' AND (date >= ? OR type = 'cost_rates')", [from]))
       .map(r => ({ id: r.id, type: r.type, plant: r.plant, date: r.date, data: JSON.parse(r.data) }));
   }
 
-  function pendingFor(user) {
+  async function pendingFor(user) {
     const forms = M.reviewableForms(user);
     if (!forms.length) return 0;
     const args = [...forms, user.id];
     let sql = `SELECT COUNT(*) AS n FROM records WHERE status = 'submitted' AND type IN (${forms.map(() => '?').join(',')}) AND submitted_by <> ?`;
     if (user.plant !== 'all') { sql += ' AND plant = ?'; args.push(user.plant); }
-    return db.prepare(sql).get(...args).n;
+    return (await db.get(sql, args)).n;
   }
 
-  return { submit, review, list, approvedSince, pendingFor, generation: () => generation };
+  /** Changes whenever an approval or void changes the approved set, on any instance. */
+  const generation = async () => { const r = await db.get('SELECT v FROM meta WHERE k = ?', [GEN_KEY]); return r ? r.v : 0; };
+
+  return { submit, review, list, approvedSince, pendingFor, generation };
 }
 
 module.exports = { makeRecords };

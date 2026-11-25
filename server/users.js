@@ -26,27 +26,39 @@ function makeUsers(db, clock) {
     const name = typeof displayName === 'string' && displayName.trim() ? displayName.trim().slice(0, 80) : username;
     const problem = passwordProblem(password);
     if (problem) throw new ValidationError(problem);
-    if (db.prepare('SELECT 1 FROM users WHERE username = ?').get(username)) throw new ValidationError('That username already exists.');
+    if (await db.get('SELECT 1 FROM users WHERE username = ?', [username])) throw new ValidationError('That username already exists.');
     const hash = await hashPassword(password);
     const now = iso();
-    const r = db.prepare('INSERT INTO users (username, display_name, role, plant, department, pass_hash, created_at, pw_changed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(username, name, role, plant, dept, hash, now, now);
-    return pub(db.prepare('SELECT * FROM users WHERE id = ?').get(r.lastInsertRowid));
+    let r;
+    try {
+      r = await db.run('INSERT INTO users (username, display_name, role, plant, department, pass_hash, created_at, pw_changed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        [username, name, role, plant, dept, hash, now, now]);
+    } catch (e) {
+      if (/UNIQUE constraint failed/.test(String(e.message))) throw new ValidationError('That username already exists.'); // created meanwhile
+      throw e;
+    }
+    return pub(await db.get('SELECT * FROM users WHERE id = ?', [r.lastInsertRowid]));
   }
 
-  const byUsername = username => db.prepare('SELECT * FROM users WHERE username = ? AND active = 1').get(String(username));
-  const byId = id => db.prepare('SELECT * FROM users WHERE id = ? AND active = 1').get(id);
+  const byUsername = username => db.get('SELECT * FROM users WHERE username = ? AND active = 1', [String(username)]);
+  const byId = id => db.get('SELECT * FROM users WHERE id = ? AND active = 1', [id]);
 
-  async function setPassword(id, password) {
+  /** Validates and hashes a new password (slow: do it before opening a transaction). */
+  async function hashNewPassword(password) {
     const problem = passwordProblem(password);
     if (problem) throw new ValidationError(problem);
-    db.prepare('UPDATE users SET pass_hash = ?, pw_changed_at = ? WHERE id = ?').run(await hashPassword(password), iso(), id);
+    return hashPassword(password);
+  }
+  /** Stores a prepared hash; q is the database or an open transaction. */
+  const storePasswordHash = (q, id, hash) => q.run('UPDATE users SET pass_hash = ?, pw_changed_at = ? WHERE id = ?', [hash, iso(), id]);
+  async function setPassword(id, password) {
+    await storePasswordHash(db, id, await hashNewPassword(password));
   }
 
-  const setActive = (username, active) => db.prepare('UPDATE users SET active = ? WHERE username = ?').run(active ? 1 : 0, username).changes;
-  const list = () => db.prepare('SELECT * FROM users ORDER BY username').all().map(r => ({ ...pub(r), active: !!r.active }));
+  const setActive = async (username, active) => (await db.run('UPDATE users SET active = ? WHERE username = ?', [active ? 1 : 0, username])).changes;
+  const list = async () => (await db.all('SELECT * FROM users ORDER BY username')).map(r => ({ ...pub(r), active: !!r.active }));
 
-  return { create, byUsername, byId, setPassword, setActive, list, pub };
+  return { create, byUsername, byId, setPassword, hashNewPassword, storePasswordHash, setActive, list, pub };
 }
 
 module.exports = { makeUsers, ValidationError, ROLES, PLANTS, DEPARTMENTS };

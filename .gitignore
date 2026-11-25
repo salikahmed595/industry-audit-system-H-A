@@ -11,3 +11,7 @@ data/
 .env
 .env.*
 !.env.example
+
+# Vercel static build output
+public/
+.vercel/

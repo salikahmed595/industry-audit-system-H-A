@@ -3,12 +3,12 @@
  * the batch (nothing half-written). Values are append-only; the dashboard reads the latest per KPI. */
 const D = require('../js/data.js');
 const { HttpError } = require('./errors');
-const { tx } = require('./db');
 const audit = require('./audit');
 
 const SOURCE_RE = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$/;
 const ISO_RE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2}))?$/;
 const MAX_RECORDS = 500;
+const INSERT_CHUNK = 100; // 7 values per row: 700 bound values per statement, far under SQLite's limit
 const MAX_AGE_MS = 400 * 864e5;
 const FUTURE_SKEW_MS = 5 * 60e3;
 const KPI_NAMES = new Map(Object.entries(D.SECTIONS).map(([id, s]) => [id, new Set(s.kpis.map(k => k[0]))]));
@@ -39,21 +39,26 @@ function validate(body, nowMs) {
 }
 
 function makeKpis(db, clock) {
-  function ingest(user, body) {
+  async function ingest(user, body) {
     const { source, records } = validate(body, clock());
     const now = new Date(clock()).toISOString();
-    return tx(db, () => {
-      const ins = db.prepare('INSERT INTO kpi_values (section, kpi, value, as_of, source, ingested_at, ingested_by) VALUES (?, ?, ?, ?, ?, ?, ?)');
-      for (const r of records) ins.run(r.section, r.kpi, r.value, r.asOf, source, now, user.id);
-      audit.append(db, { ts: now, user, action: 'kpi.ingest', target: null, detail: { source, count: records.length, msg: `${records.length} KPI value(s) ingested from ${source}` } });
+    return db.tx(async t => {
+      // Multi-row INSERTs: on Turso every statement is a network round trip inside an open write transaction,
+      // so 500 single-row INSERTs would hold the database's write lock for seconds.
+      for (let i = 0; i < records.length; i += INSERT_CHUNK) {
+        const chunk = records.slice(i, i + INSERT_CHUNK);
+        await t.run(`INSERT INTO kpi_values (section, kpi, value, as_of, source, ingested_at, ingested_by) VALUES ${chunk.map(() => '(?, ?, ?, ?, ?, ?, ?)').join(', ')}`,
+          chunk.flatMap(r => [r.section, r.kpi, r.value, r.asOf, source, now, user.id]));
+      }
+      await audit.append(t, { ts: now, user, action: 'kpi.ingest', target: null, detail: { source, count: records.length, msg: `${records.length} KPI value(s) ingested from ${source}` } });
       return { accepted: records.length };
     });
   }
 
-  function latest() {
-    return db.prepare(`SELECT section, kpi, value, as_of AS asOf, source, ingested_at AS ingestedAt FROM kpi_values k
+  async function latest() {
+    return (await db.all(`SELECT section, kpi, value, as_of AS asOf, source, ingested_at AS ingestedAt FROM kpi_values k
       WHERE id = (SELECT id FROM kpi_values WHERE section = k.section AND kpi = k.kpi ORDER BY as_of DESC, id DESC LIMIT 1)
-      ORDER BY section, kpi`).all().map(r => ({ ...r }));
+      ORDER BY section, kpi`)).map(r => ({ ...r }));
   }
 
   return { ingest, latest };

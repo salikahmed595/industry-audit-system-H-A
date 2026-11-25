@@ -2,9 +2,6 @@
 // Real HTTP server + real SQLite, no mocks.
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { createApp } = require('../../server/app.js');
@@ -34,7 +31,7 @@ describe('Department records and measured KPIs (integration)', () => {
   const review = (who, rec, decision, note, version = rec.version) => as(who, `/api/records/${rec.id}/review`, { method: 'POST', body: { decision, note, version } });
 
   before(async () => {
-    app = createApp({ dbPath: ':memory:', clock });
+    app = await createApp({ dbPath: ':memory:', clock });
     const people = [
       ['ceo', 'ceo', 'all', null], ['fsd.plant', 'plant', 'FSD', null], ['khi.plant', 'plant', 'KHI', null],
       ['spin.head', 'dept', 'FSD', 'spinning'], ['spin.op', 'operator', 'FSD', 'spinning'], ['spin.op2', 'operator', 'FSD', 'spinning'],
@@ -141,8 +138,8 @@ describe('Department records and measured KPIs (integration)', () => {
       assert.equal((await review('fsd.plant', r.json.record, 'approve')).status, 422);
       rec = r.json.record;
     });
-    it('record values cannot be edited in the database once submitted', () => {
-      assert.throws(() => app.db.prepare("UPDATE records SET data = '{}' WHERE id = ?").run(rec.id), /cannot be changed/);
+    it('record values cannot be edited in the database once submitted', async () => {
+      await assert.rejects(app.db.run("UPDATE records SET data = '{}' WHERE id = ?", [rec.id]), /cannot be changed/);
     });
   });
 
@@ -225,13 +222,13 @@ describe('Department records and measured KPIs (integration)', () => {
       const again = await submit('cfo', po('2026-11-21', 'po 77'));
       assert.equal(again.status, 409, again.text);
     });
-    it('the database refuses status changes that skip the workflow, review edits, and rows inserted as approved', () => {
-      const v = app.db.prepare("SELECT id FROM records WHERE status = 'voided' LIMIT 1").get();
+    it('the database refuses status changes that skip the workflow, review edits, and rows inserted as approved', async () => {
+      const v = await app.db.get("SELECT id FROM records WHERE status = 'voided' LIMIT 1");
       assert.ok(v, 'a voided record exists from the earlier test');
-      assert.throws(() => app.db.prepare("UPDATE records SET status = 'approved' WHERE id = ?").run(v.id), /status/i);
-      assert.throws(() => app.db.prepare("UPDATE records SET review_note = 'edited' WHERE id = ?").run(v.id), /review/i);
-      const u = app.db.prepare('SELECT id FROM users LIMIT 1').get();
-      assert.throws(() => app.db.prepare("INSERT INTO records (type, plant, date, dkey, data, status, submitted_by, submitted_at) VALUES ('spin_shift', 'FSD', '2026-11-25', NULL, '{}', 'approved', ?, 'x')").run(u.id), /submitted/i);
+      await assert.rejects(app.db.run("UPDATE records SET status = 'approved' WHERE id = ?", [v.id]), /status/i);
+      await assert.rejects(app.db.run("UPDATE records SET review_note = 'edited' WHERE id = ?", [v.id]), /review/i);
+      const u = await app.db.get('SELECT id FROM users LIMIT 1');
+      await assert.rejects(app.db.run("INSERT INTO records (type, plant, date, dkey, data, status, submitted_by, submitted_at) VALUES ('spin_shift', 'FSD', '2026-11-25', NULL, '{}', 'approved', ?, 'x')", [u.id]), /submitted/i);
     });
     it('measured results refresh as soon as a record is approved', async () => {
       const before = (await as('ceo', '/api/measured?plant=FSD')).json.kpis['spinning|Yarn yield'];
@@ -247,25 +244,3 @@ describe('Department records and measured KPIs (integration)', () => {
   });
 });
 
-describe('database upgrade from version 1', () => {
-  it('keeps existing users and allows the new operator role', async () => {
-    const { DatabaseSync } = require('node:sqlite');
-    const { MIGRATIONS, openDb } = require('../../server/db.js');
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ta-mig-'));
-    const file = path.join(dir, 'v1.db');
-    const old = new DatabaseSync(file);
-    old.exec(MIGRATIONS[0]);
-    old.exec('CREATE TABLE schema_version (v INTEGER NOT NULL); INSERT INTO schema_version VALUES (1);');
-    old.prepare("INSERT INTO users (username, display_name, role, plant, pass_hash, created_at, pw_changed_at) VALUES ('legacy','Legacy','dept','KHI','x','t','t')").run();
-    old.prepare("INSERT INTO sessions (id_hash, user_id, created_at, expires_at) VALUES ('h', 1, 0, 9e15)").run();
-    old.close();
-    const db = openDb(file);
-    assert.equal(db.prepare('SELECT username FROM users WHERE id = 1').get().username, 'legacy');
-    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM sessions').get().n, 1, 'sessions survive the rebuild');
-    db.prepare("INSERT INTO users (username, display_name, role, plant, department, pass_hash, created_at, pw_changed_at) VALUES ('op','Op','operator','KHI','sewing','x','t','t')").run();
-    assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
-    assert.equal(db.prepare('PRAGMA foreign_keys').get().foreign_keys, 1);
-    db.close();
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
-});

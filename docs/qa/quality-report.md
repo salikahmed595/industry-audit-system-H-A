@@ -147,3 +147,87 @@ No P0 or P1 findings. Each fix was done RED → GREEN: the test was written firs
 The reviewer also checked these and found them OK: parameterised SQL (including the dynamic IN lists), prototype-pollution handling, escaping of every record-derived string in the UI (stored XSS), numeric and date validation, the order of review authorisation checks, the version race inside `BEGIN IMMEDIATE`, audit atomicity, body limits, and the safety of migration 2.
 
 Load / performance test: **NOT EXECUTED**.
+
+## Vercel + Turso port (2026-11-25)
+
+**Why:** the live Vercel site returned `404` on every `/api/*` route (`X-Vercel-Error: NOT_FOUND`) because Vercel served only the static files. The Node server and its SQLite file cannot run on Vercel, whose file system is not persistent.
+
+### What changed
+- `server/db.js`: async libSQL adapter (`@libsql/client` 0.18.0, pinned, `npm audit`: 0 vulnerabilities). It works on a local SQLite file, in memory, or on Turso.
+  - `db.tx()` runs `BEGIN IMMEDIATE` through an in-process FIFO queue; a nested call joins the open transaction.
+  - `busy_timeout` handles other processes. `recursive_triggers` is on inside every transaction.
+  - Migrations re-check the version inside their own transaction, so cold starts racing each other are safe.
+- Every repository (`users`, `actions`, `kpis`, `records`, `audit`, `measured`), `server/app.js` and the user CLI are now async.
+- **State that was in memory is now in the database:**
+  - sign-in throttling: the `login_throttle` table (migration 4)
+  - the measured-cache version: a `meta` counter bumped inside the approve/void transaction
+  - first-run seeding: the check now runs inside the transaction
+- **Vercel:**
+  - `api/index.js` is the function entry. It handles both the original URL and the rewritten `/api/index?__path=` form, and returns `503` JSON on bad configuration.
+  - `scripts/build-static.js` copies only `index.html`, `css/*.css` and `js/*.js` into `public/`.
+  - `vercel.json` sets the build, the rewrite and the CSP/HSTS headers.
+- `server/config.js`: `DB_URL` / `DB_AUTH_TOKEN`. Startup fails fast when `DB_URL` is missing on Vercel or the token is missing.
+
+### Executed
+- `npm test`: **313 tests, 313 pass, 0 fail** (222 unit + 91 integration). Run three times in a row: 313/313 each time.
+  - New `db.test.mjs` (11 tests):
+    - transactions: commit, rollback, nesting, a 25-way parallel queue
+    - two **separate processes** writing one file with no lost update
+    - two processes racing the migrations
+    - foreign keys and the `INSERT OR REPLACE` guard
+    - upgrade from v1
+  - New `multi-instance.test.mjs` (4 tests): **two real server processes on one database.**
+    - lockout reached on A is enforced on B
+    - an approval on B is counted at once on A
+    - seeding happens once
+    - both answer the health check
+    - **RED evidence:** run against the previous commit in a temporary worktree, it failed 4/4 (B answered `200` after 5 failures on A; A still counted `0` after B's approval). It passes 4/4 now.
+  - New `vercel.test.mjs` (7 tests):
+    - the function entry on both URL forms
+    - a JSON body still readable after the rewrite
+    - `__path` traversal strings returning `404`
+    - no static files from the function
+    - security headers
+    - `503` without leaking configuration
+    - the static build publishing only allow-listed files
+    - RED before `api/index.js` existed, GREEN after.
+- Browser E2E on the dev server (`data/dev.db`, upgraded from schema v3 to v4 on start):
+  - the existing session survived the upgrade
+  - sign out, then sign in as `admin`
+  - `/api/audit/verify` → `ok: true`, 38 entries: the hash chain is unbroken across rows written by the old and the new engine
+  - all 12 admin pages loaded with no page or console errors
+  - server log: no errors
+
+### Not verified
+- **The real Vercel + Turso deployment: NOT VERIFIED.** It needs the owner's Turso account and Vercel environment variables. These platform behaviours are covered locally but not observed on Vercel: the rewrite form the function receives, request-body streaming with Vercel's helpers, the bundling of the native libSQL binary, and Turso's HTTP transaction latency. Smoke test after deploying: `GET /api/health`, sign in, submit and approve one record, then **Check audit integrity**.
+- Load / performance test: **NOT EXECUTED**.
+
+## Independent security review of the port (2026-11-25)
+
+A separate reviewer read the port without running anything and reported 12 findings. Each one was checked against the code before acting on it.
+
+| # | Finding | Decision and fix | Evidence |
+|---|---|---|---|
+| 1 | A 500-record KPI batch ran 500 single-row INSERTs inside one Turso write transaction (seconds of write lock) | Fixed: multi-row INSERTs of 100 rows (5 statements). `recursive_triggers` is now set only on local files (one round trip saved per Turso write; the app never uses `REPLACE`) | New API test: a 500-record batch is stored completely (count, min, max) |
+| 2 | `dev.env` is committed | False positive: it holds only `NODE_ENV`, `HOST`, `PORT`, `DB_PATH`. Still added `.vercelignore` so a `vercel` CLI deploy never uploads `data/` (dev database and dev login file) or `.env*` | File review |
+| 3 | Every sign-in attempt, even a locked-out one, took the write lock; success used three separate transactions | Fixed: a locked-out attempt is answered from one read with no transaction. Expired counters count as zero, so the per-attempt DELETE became a 1-in-20 purge. Success is one transaction (release attempt, session, audit). Same for password change | New test: lockout lifts after 15 min with a fresh count; existing burst and lockout tests |
+| 4 | Every cold start opened 4 write transactions to check migrations | Fixed: one read; no write at all once the schema is current | New test: with another **process** holding the write lock, opening the database took < 1.5 s. RED with the fix removed: 4065 ms |
+| 5 | A stalled network call inside a transaction would block every writer forever | Fixed: 10 s deadline, then rollback and the queue moves on. A remote BEGIN is retried up to 3 times with jitter (nothing has run yet, so it is safe) | New test (200 ms deadline): stalled write rolled back, next transaction runs. RED: the test hung |
+| 6 | Action history read every audit row with a target, including one per department record | Fixed: reads only the 33 finding ids through the `audit_target` index (`EXPLAIN QUERY PLAN` confirms) | Browser: F07 history 7 = 7 audit rows; record rows excluded |
+| 7 | IPv6 clients could rotate addresses in their /64; a victim's successful sign-in reset an attacker's count from the same NAT address; another proxy in front of Vercel would merge everyone into one bucket | Fixed: throttle keyed per IPv4 address and IPv6 /64 (IPv4-mapped → IPv4); success gives back only its own attempt. Proxy case documented in the README | New unit tests (`ipBucket`) and 3 integration tests, all RED first (401 instead of 429; 200 instead of 429) |
+| 8 | If `beforeBegin` failed, `afterEnd` (foreign keys back ON) was skipped | Fixed: both inside one try/finally; also found that the client's local connection **pool** could run a setting on one connection and the transaction on another, so local databases now use a single connection and every local call is queued, as the earlier synchronous code did | Upgrade-from-v1 and foreign-key tests |
+| 9 | Password change was three separate writes | Fixed: hash first, then one transaction (new hash, other sessions signed out, audit entry) | Existing password tests (401 / 400 / 204, other sessions ended) |
+| 10 | `DB_URL` accepted `user:pw@`, `?authToken=` and fragments; the startup log printed it | Fixed: bare host (and port) only; the log shows only the host; the client is closed if opening fails | New config test; the old pattern accepted 3 of the 4 bad values |
+| 11 | The build script would empty any folder inside the project given as its output | Fixed: only `public/` or a folder outside the project (case-insensitive on Windows) | New test. Not run RED on purpose: against the old guard it would have emptied the real `server/` folder |
+| 12 | A duplicated `__path` was ambiguous; on `:memory:` a read during a transaction failed with `TRANSACTION_ACTIVE` | Fixed: duplicate → `400`; local reads queue behind the open transaction | New tests; the read test was RED |
+
+### Executed after the fixes
+- `npm test`: **330 tests, 330 pass, 0 fail** (227 unit + 103 integration), three runs in a row.
+- Browser on the restarted dev server:
+  - `/api/health` 200
+  - all 12 pages render
+  - no console or server errors
+  - sign out, a wrong password (clear error, field cleared), then a correct sign-in
+  - `login_throttle` afterwards holds exactly the one failure; the success released its own attempt
+  - audit chain `ok`, 41 entries
+- Not verified, as before: the real Vercel + Turso deployment, and any load test (**NOT EXECUTED**).

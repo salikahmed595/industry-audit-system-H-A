@@ -11,7 +11,7 @@ const CACHE_MAX = 64;
 
 function makeMeasured(records, clock) {
   const cache = new Map();
-  function get(query, user) {
+  async function get(query, user) {
     const own = user && user.plant !== 'all' ? user.plant : null;
     const plant = query.get('plant') || own || 'all';
     const period = query.get('period') || 'm';
@@ -19,10 +19,10 @@ function makeMeasured(records, clock) {
     if (!Object.prototype.hasOwnProperty.call(M.PERIODS, period)) throw new HttpError(400, `period must be one of ${Object.keys(M.PERIODS).join(', ')}.`);
     if (own && plant !== own) throw new HttpError(403, `You can only see measured KPIs for plant ${own}.`);
     const today = new Date(clock()).toISOString().slice(0, 10);
-    const key = `${plant}|${period}|${today}|${records.generation()}`;
+    const key = `${plant}|${period}|${today}|${await records.generation()}`;
     if (cache.has(key)) return cache.get(key);
     const win = M.windowFor(period, today);
-    const out = M.measureAll(records.approvedSince(win.from), { plant, period, today });
+    const out = M.measureAll(await records.approvedSince(win.from), { plant, period, today });
     if (cache.size >= CACHE_MAX) cache.clear();
     cache.set(key, out);
     return out;

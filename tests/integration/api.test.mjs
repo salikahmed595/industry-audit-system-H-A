@@ -30,7 +30,7 @@ describe('API (integration)', () => {
   const state = async c => (await req(base, '/api/state', { cookie: c })).json;
 
   before(async () => {
-    app = createApp({ dbPath: ':memory:', clock, loginMaxFailures: 5 });
+    app = await createApp({ dbPath: ':memory:', clock, loginMaxFailures: 5 });
     for (const [username, role, plant] of [['ceo', 'ceo', 'all'], ['khi.plant', 'plant', 'KHI'], ['khi.dept', 'dept', 'KHI'], ['cfo', 'finance', 'all'], ['feed', 'integration', 'all'], ['admin', 'admin', 'all'], ['lockme', 'dept', 'KHI'], ['pwuser', 'dept', 'KHI'], ['expire', 'ceo', 'all']]) {
       await app.users.create({ username, displayName: username, role, plant, password: PW });
     }
@@ -91,6 +91,11 @@ describe('API (integration)', () => {
       for (let i = 0; i < 5; i++) await req(base, '/api/login', { method: 'POST', body: { username: 'lockme', password: 'bad password ' + i } });
       const r = await req(base, '/api/login', { method: 'POST', body: { username: 'lockme', password: PW } });
       assert.equal(r.status, 429);
+    });
+    it('lifts the lockout once its 15-minute window has passed, with a fresh count', async () => {
+      now += 15 * 60e3 + 1000;
+      assert.equal((await req(base, '/api/login', { method: 'POST', body: { username: 'lockme', password: 'bad password again' } })).status, 401, 'expired failures no longer count');
+      assert.equal((await req(base, '/api/login', { method: 'POST', body: { username: 'lockme', password: PW } })).status, 200);
     });
     it('logout invalidates the session server-side', async () => {
       const c = await login('ceo');
@@ -220,13 +225,13 @@ describe('API (integration)', () => {
       assert.ok(r.json.count > 5);
       assert.equal((await req(base, '/api/audit/verify', { cookie: dept })).status, 403);
     });
-    it('refuses UPDATE and DELETE on the audit table at the database level', () => {
-      assert.throws(() => app.db.exec("UPDATE audit_log SET action = 'x' WHERE id = 1"), /append-only/);
-      assert.throws(() => app.db.exec('DELETE FROM audit_log WHERE id = 1'), /append-only/);
+    it('refuses UPDATE and DELETE on the audit table at the database level', async () => {
+      await assert.rejects(app.db.exec("UPDATE audit_log SET action = 'x' WHERE id = 1"), /append-only/);
+      await assert.rejects(app.db.exec('DELETE FROM audit_log WHERE id = 1'), /append-only/);
     });
     it('detects a row edited behind the triggers', async () => {
-      app.db.exec('DROP TRIGGER audit_no_update');
-      app.db.exec("UPDATE audit_log SET detail = '{\"forged\":true}' WHERE id = 2");
+      await app.db.exec('DROP TRIGGER audit_no_update');
+      await app.db.exec("UPDATE audit_log SET detail = '{\"forged\":true}' WHERE id = 2");
       const ceo = await login('ceo');
       const r = await req(base, '/api/audit/verify', { cookie: ceo });
       assert.equal(r.json.ok, false);
@@ -246,6 +251,15 @@ describe('API (integration)', () => {
       const rft = k.find(x => x.section === 'dyeing' && x.kpi === 'Right-first-time dyeing');
       assert.equal(rft.value, 81.5);
       assert.equal(rft.source, 'MES-KHI');
+    });
+    it('stores a full 500-record batch (several multi-row INSERTs) and keeps every value', async () => {
+      const feed = await login('feed');
+      const records = Array.from({ length: 500 }, (_, i) => rec({ value: i, asOf: new Date(Date.parse('2026-11-20T00:00:00Z') + i * 60e3).toISOString() }));
+      const r = await req(base, '/api/kpis/ingest', { method: 'POST', cookie: feed, body: { source: 'MES-BULK', records } });
+      assert.equal(r.status, 200, r.text);
+      assert.equal(r.json.accepted, 500);
+      const row = await app.db.get("SELECT COUNT(*) AS n, MIN(value) AS lo, MAX(value) AS hi FROM kpi_values WHERE source = 'MES-BULK'");
+      assert.deepEqual({ ...row }, { n: 500, lo: 0, hi: 499 });
     });
     it('rejects the whole batch if any record is invalid', async () => {
       const feed = await login('feed');

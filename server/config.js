@@ -16,7 +16,9 @@ function loadConfig(env = process.env) {
     production,
     host: env.HOST || '127.0.0.1',
     port: int('PORT', env.PORT, 8080, 0, 65535),
-    dbPath: env.DB_PATH || path.join(__dirname, '..', 'data', 'textile-audit.db'),
+    // DB_URL: a Turso database (libsql://…), used on Vercel. Otherwise DB_PATH: a local SQLite file.
+    dbPath: env.DB_URL || env.DB_PATH || path.join(__dirname, '..', 'data', 'textile-audit.db'),
+    dbAuthToken: env.DB_AUTH_TOKEN || null,
     publicOrigin: env.PUBLIC_ORIGIN || null,
     secureCookies: bool(env.SECURE_COOKIES, production),
     trustProxy: bool(env.TRUST_PROXY, false),
@@ -24,6 +26,11 @@ function loadConfig(env = process.env) {
     loginMaxFailures: int('LOGIN_MAX_FAILURES', env.LOGIN_MAX_FAILURES, 5, 3, 50),
   };
   if (cfg.publicOrigin && !/^https?:\/\/[^/\s]+$/.test(cfg.publicOrigin)) throw new Error('PUBLIC_ORIGIN must look like https://audit.example.com (no path, no trailing slash)');
+  // A bare host only: no user:password@, query (?authToken=…), path or fragment, so the token can only come from DB_AUTH_TOKEN.
+  if (env.DB_URL && !/^(libsql|https|wss):\/\/[A-Za-z0-9.-]+(:\d{1,5})?\/?$/.test(env.DB_URL)) throw new Error('DB_URL must look like libsql://your-db-your-org.turso.io');
+  if (env.DB_URL && !cfg.dbAuthToken) throw new Error('DB_AUTH_TOKEN is required with DB_URL (create one with: turso db tokens create <db>)');
+  // Vercel's file system is read-only and wiped between requests: a local SQLite file would lose every record.
+  if (env.VERCEL && !env.DB_URL) throw new Error('DB_URL and DB_AUTH_TOKEN must be set on Vercel (a hosted Turso database)');
   if (production) {
     if (!cfg.publicOrigin) throw new Error('PUBLIC_ORIGIN is required when NODE_ENV=production');
     if (!cfg.publicOrigin.startsWith('https://')) throw new Error('PUBLIC_ORIGIN must use https:// in production');
