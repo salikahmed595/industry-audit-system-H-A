@@ -1,0 +1,7 @@
+# Local / machine-specific
+.claude/settings.local.json
+node_modules/
+artifacts/
+.DS_Store
+Thumbs.db
+*.log
