@@ -5,3 +5,9 @@ artifacts/
 .DS_Store
 Thumbs.db
 *.log
+
+# Runtime data and secrets
+data/
+.env
+.env.*
+!.env.example

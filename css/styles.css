@@ -565,3 +565,26 @@ td.wrap { white-space: normal; min-width: 220px; color: var(--muted); font-size:
   .app { display: block; }
   .card, .glass { box-shadow: none; backdrop-filter: none; background: #fff; color: #000; border-color: #ccc; }
 }
+
+/* ---------------------------------------------------------------- live data, sign-in, account */
+.k-bm .live { display: block; color: var(--good); font-weight: 600; }
+.k-bm .demo { color: var(--faint); font-style: italic; }
+input[type="password"], .login-card input, #pwForm input { background: var(--glass); border: 1px solid var(--stroke); border-radius: 12px; padding: 10px 12px; width: 100%; outline: none; transition: border-color .2s, box-shadow .2s; }
+#pwForm label.f { margin-top: 10px; }
+.user-btn { gap: 8px; height: 36px; padding: 0 12px 0 8px; text-align: left; }
+.user-btn .lbl { display: flex; flex-direction: column; line-height: 1.1; }
+.user-btn .lbl b { font-size: 12.5px; }
+.user-btn .lbl small { font-size: 10.5px; color: var(--muted); }
+.login { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 20px; background: rgba(5, 8, 18, .55); backdrop-filter: blur(6px); }
+.login[hidden] { display: none; }
+.login-card { width: min(400px, 100%); border-radius: 24px; padding: 26px 26px 22px; display: flex; flex-direction: column; }
+.login-card h2 { margin: 10px 0 4px; font-size: 22px; letter-spacing: -.02em; }
+.login-card p { margin: 0 0 14px; }
+.login-card label.f { margin-top: 12px; }
+.login-card .btn { margin-top: 18px; justify-content: center; height: 42px; }
+.login-msg { padding: 10px 12px; border-radius: 12px; background: var(--bad-s); color: var(--text, inherit); font-size: 13px; margin-bottom: 4px; }
+.login-msg[hidden] { display: none; }
+body.locked .app { filter: blur(3px); pointer-events: none; user-select: none; }
+body.busy { cursor: progress; }
+body.busy [data-adv], body.busy [data-verify], body.busy [data-reopen] { pointer-events: none; opacity: .6; }
+@media (max-width: 780px) { .user-btn .lbl { display: none; } .user-btn { padding: 0 9px; } }

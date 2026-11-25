@@ -1,0 +1,20 @@
+{
+  "name": "textile-ai-audit",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Root-cause control tower for large textile groups: dashboard + API with server-enforced 8D workflow and tamper-evident audit log.",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server/index.js",
+    "test": "node --disable-warning=ExperimentalWarning --test \"tests/unit/*.test.mjs\" \"tests/integration/*.test.mjs\"",
+    "user:create": "node --disable-warning=ExperimentalWarning server/cli/users.js create",
+    "user:reset": "node --disable-warning=ExperimentalWarning server/cli/users.js reset",
+    "user:disable": "node --disable-warning=ExperimentalWarning server/cli/users.js disable",
+    "user:enable": "node --disable-warning=ExperimentalWarning server/cli/users.js enable",
+    "user:list": "node --disable-warning=ExperimentalWarning server/cli/users.js list",
+    "dev": "node --disable-warning=ExperimentalWarning --env-file=dev.env server/index.js"
+  }
+}

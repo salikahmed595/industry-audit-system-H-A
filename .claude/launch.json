@@ -3,8 +3,8 @@
   "configurations": [
     {
       "name": "textile-audit",
-      "runtimeExecutable": "python",
-      "runtimeArgs": ["-m", "http.server", "5174", "--bind", "127.0.0.1"],
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["--disable-warning=ExperimentalWarning", "--env-file=dev.env", "server/index.js"],
       "port": 5174
     }
   ]

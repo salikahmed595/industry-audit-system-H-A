@@ -77,45 +77,63 @@
   const D8_BY_STAGE = { detected: 1, diagnosed: 4, approved: 5, in_progress: 6, verified: 8 };
   const ST_WORD = { good: 'On target', warn: 'Near target', bad: 'Off target', unknown: 'No data' };
 
-  // ---------------------------------------------------------------- state & persistence
-  const STORE_KEY = 'ta.state.v1';
-  const TODAY = new Date('2026-11-25T09:00:00');
-  const SEED = { F07: 'approved', F12: 'in_progress', F02: 'verified', F14: 'in_progress', F09: 'diagnosed', F24: 'approved', F20: 'diagnosed', F15: 'diagnosed', F25: 'in_progress', F10: 'approved', F27: 'verified', F04: 'diagnosed', F22: 'diagnosed' };
-  const SEED_AFTER = { F02: 3, F27: 1.6 };
-
-  function seedAction(f, i) {
-    const stage = SEED[f.id] || 'detected';
-    const due = new Date(TODAY.getTime() + (7 + (i * 5) % 50) * 864e5).toISOString().slice(0, 10);
-    const n = D8_BY_STAGE[stage];
-    return { stage, due, d8: D8.map((_, k) => k < n), after: SEED_AFTER[f.id] === undefined ? null : SEED_AFTER[f.id], hist: [{ t: '2026-11-20T10:00:00.000Z', e: `Detected by AI scan (${STAGE_NAME[stage]} at seed)` }] };
-  }
-  const seedAll = () => { const a = {}; D.FINDINGS.forEach((f, i) => { a[f.id] = seedAction(f, i); }); return a; };
-
-  function validAction(a) {
-    return a && typeof a === 'object' && RCA.STAGES.includes(a.stage) && Array.isArray(a.d8) && a.d8.length === 8 && a.d8.every(x => typeof x === 'boolean') &&
-      typeof a.due === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(a.due) && (a.after === null || Number.isFinite(a.after)) && Array.isArray(a.hist);
-  }
-  function load() {
-    const def = { plant: 'all', period: 'm', role: 'ceo', actions: seedAll(), log: [], lastScan: null };
+  // ---------------------------------------------------------------- state: view prefs local, business data from the server
+  const PREF_KEY = 'ta.prefs.v1';
+  const VIEW_ROLES = ['ceo', 'plant', 'dept', 'finance'];
+  const APPROVER_ROLES = ['ceo', 'plant', 'finance'];
+  function loadPrefs() {
+    const p = { plant: 'all', period: 'm' };
     try {
-      const raw = JSON.parse(localStorage.getItem(STORE_KEY) || 'null');
-      if (!raw || typeof raw !== 'object') return def;
-      const s = { ...def };
-      if (D.PLANTS.some(p => p.id === raw.plant)) s.plant = raw.plant;
-      if (PERIODS.some(p => p.id === raw.period)) s.period = raw.period;
-      if (D.ROLES.some(r => r.id === raw.role)) s.role = raw.role;
-      if (raw.actions && typeof raw.actions === 'object') {
-        D.FINDINGS.forEach(f => { if (validAction(raw.actions[f.id])) s.actions[f.id] = { ...raw.actions[f.id], hist: raw.actions[f.id].hist.filter(h => h && typeof h.t === 'string' && typeof h.e === 'string').slice(-40) }; });
-      }
-      if (Array.isArray(raw.log)) s.log = raw.log.filter(l => l && typeof l.t === 'string' && typeof l.e === 'string' && typeof l.r === 'string').slice(0, 200);
-      if (typeof raw.lastScan === 'string') s.lastScan = raw.lastScan;
-      return s;
-    } catch (e) { return def; }
+      const raw = JSON.parse(localStorage.getItem(PREF_KEY) || 'null');
+      if (raw && D.PLANTS.some(x => x.id === raw.plant)) p.plant = raw.plant;
+      if (raw && PERIODS.some(x => x.id === raw.period)) p.period = raw.period;
+    } catch (e) { /* ignore bad prefs */ }
+    return p;
   }
-  const S = load();
-  const ui = { gQ: '', gDom: 'All', gLetter: '', lQ: '', lDom: 'All', aFilter: 'all', lastPage: null, pIdx: 0, pItems: [], drawerFor: null, lastFocus: null };
-  function save() { try { localStorage.setItem(STORE_KEY, JSON.stringify({ plant: S.plant, period: S.period, role: S.role, actions: S.actions, log: S.log, lastScan: S.lastScan })); } catch (e) { /* storage full or blocked: keep working in memory */ } }
-  function logEv(e) { S.log.unshift({ t: new Date().toISOString(), r: S.role, e }); S.log = S.log.slice(0, 200); }
+  const S = { ...loadPrefs(), role: 'ceo', user: null, actions: {}, log: [], lastScan: null };
+  const LIVE = {}; // 'section|kpi' -> { value, asOf, source } from the KPI feed
+  const ui = { gQ: '', gDom: 'All', gLetter: '', lQ: '', lDom: 'All', aFilter: 'all', lastPage: null, pIdx: 0, pItems: [], drawerFor: null, lastFocus: null, busy: false };
+  function save() { try { localStorage.setItem(PREF_KEY, JSON.stringify({ plant: S.plant, period: S.period })); } catch (e) { /* storage blocked: keep prefs in memory */ } }
+  try { localStorage.removeItem('ta.state.v1'); } catch (e) { /* old client-side store is no longer trusted */ }
+  const userCanApprove = () => !!S.user && APPROVER_ROLES.includes(S.user.role);
+  const canAct = f => !!S.user && VIEW_ROLES.includes(S.user.role) && (S.user.plant === 'all' || S.user.plant === f.plant);
+  const canAudit = () => !!S.user && ['ceo', 'finance', 'admin'].includes(S.user.role); // mirrors server AUDIT_VIEWERS
+  const whyCannot = f => (!S.user || !VIEW_ROLES.includes(S.user.role) ? 'Your account type cannot change actions' : 'This action belongs to another plant');
+
+  // ---------------------------------------------------------------- API client
+  async function api(path, opts = {}) {
+    const init = { method: opts.method || 'GET', credentials: 'same-origin', headers: {} };
+    if (opts.body !== undefined) { init.headers['Content-Type'] = 'application/json'; init.body = JSON.stringify(opts.body); }
+    let res;
+    try { res = await fetch(path, init); } catch (e) { const err = new Error('Cannot reach the server. Check your connection and try again.'); err.status = 0; throw err; }
+    let data = null;
+    try { data = await res.json(); } catch (e) { /* empty body */ }
+    if (!res.ok) {
+      const err = new Error((data && data.error) || `Request failed (${res.status})`);
+      err.status = res.status; err.data = data;
+      if (res.status === 401 && !opts.quiet401) showLogin('Your session has ended. Please sign in again.');
+      throw err;
+    }
+    return data;
+  }
+  function applyKpis(list) {
+    (Array.isArray(list) ? list : []).forEach(k => {
+      const s = D.SECTIONS[k.section];
+      const row = s && s.kpis.find(x => x[0] === k.kpi);
+      if (row && Number.isFinite(k.value)) { row[1] = k.value; LIVE[`${k.section}|${k.kpi}`] = k; }
+    });
+  }
+  function applyState(st) {
+    S.user = st.user;
+    S.role = VIEW_ROLES.includes(st.user.role) ? st.user.role : 'ceo';
+    S.actions = st.actions || {};
+    S.log = Array.isArray(st.log) ? st.log : [];
+    applyKpis(st.kpis);
+  }
+  function applyAction(res) {
+    if (res && res.action) S.actions[res.action.id] = res.action;
+    if (res && Array.isArray(res.log)) S.log = res.log;
+  }
 
   // ---------------------------------------------------------------- derived data
   const per = () => PERIODS.find(p => p.id === S.period);
@@ -195,7 +213,11 @@
       <span class="k-val">${withUnit(v, u)}</span>
       <span class="k-sub"><span>Target ${esc(fmtVal(t))}${u === '%' ? '%' : ''}</span><span>${st === 'good' ? 'On target' : `Gap ${esc(fmtVal(Math.abs(gap)))}`}</span></span>
       <span class="meter ${st}"><i style="--w:${prog.toFixed(1)}%"></i></span>
-      <span class="k-bm">${esc(bm)}</span></button>`;
+      <span class="k-bm">${liveNote(secId, name)}${esc(bm)}</span></button>`;
+  }
+  function liveNote(secId, name) {
+    const live = LIVE[`${secId}|${name}`];
+    return live ? `<span class="live">● Live from ${esc(live.source)} · ${esc(new Date(live.asOf).toLocaleDateString())}</span>` : '<span class="demo">Demo value · </span>';
   }
 
   function findingCard(f, i) {
@@ -292,7 +314,7 @@
     const acts = list.map(f => S.actions[f.id]);
     const waitingApproval = list.filter(f => S.actions[f.id].stage === 'diagnosed');
     const execution = list.filter(f => ['approved', 'in_progress'].includes(S.actions[f.id].stage));
-    const canApprove = ['ceo', 'plant', 'finance'].includes(S.role);
+    const canApprove = userCanApprove();
     const constraint = D.STREAM.find(s => s.constraint);
     const role = D.ROLES.find(r => r.id === S.role);
     const heroLine = {
@@ -322,7 +344,7 @@
     return `
     <section class="card hero rise glass" style="--i:0">
       <div>
-        <div class="eyebrow"><span class="pulse"></span>AI scan ${S.lastScan ? 'updated ' + esc(new Date(S.lastScan).toLocaleString()) : 'complete'} · viewing as ${esc(role.name)}</div>
+        <div class="eyebrow"><span class="pulse"></span>Signed in as ${esc(S.user.displayName)} · ${esc(roleName(S.user.role))}${S.user.plant !== 'all' ? ' · ' + esc(plantShort(S.user.plant)) : ''}</div>
         <h2>${heroLine}</h2>
         <p>${esc(role.focus)} The scan found <b>${list.length} finding${list.length === 1 ? '' : 's'}</b> across ${esc(S.plant === 'all' ? 'the group' : plantShort(S.plant))}. They are ranked by money, customer impact, effort, risk and confidence, and each has a root cause, an owner and a fix.</p>
         <div class="cta">
@@ -527,7 +549,7 @@
       return true;
     };
     const shown = list.filter(pass);
-    const canApprove = ['ceo', 'plant', 'finance'].includes(S.role);
+    const canApprove = userCanApprove();
     const cnt = k => list.filter(f => { const a = S.actions[f.id]; return k === 'approve' ? a.stage === 'diagnosed' : k === 'progress' ? ['approved', 'in_progress'].includes(a.stage) : k === 'verified' ? a.stage === 'verified' : k === 'ineffective' ? a.stage === 'verified' && !isEffective(f, a) : true; }).length;
     const chips = [['all', 'All'], ['approve', 'Needs approval'], ['progress', 'In execution'], ['verified', 'Verified'], ['ineffective', 'Not effective']]
       .map(([k, l]) => `<a class="chip ${filter === k ? 'on' : ''}" href="#/actions/${k}">${l} <span class="n">${cnt(k)}</span></a>`).join('');
@@ -540,21 +562,21 @@
           const a = S.actions[f.id];
           const eff = st === 'verified' ? isEffective(f, a) : null;
           const next = RCA.next(st);
-          const blocked = next === 'approved' && !canApprove;
+          const blockWhy = !canAct(f) ? whyCannot(f) : next === 'approved' && !canApprove ? 'Only CEO, Plant Head or Finance can approve' : '';
           return `<div class="ac ${eff === false ? 'ineff' : ''}" style="--i:${i}"><h5><button data-open="${f.id}">${esc(f.title)}</button></h5>
             <div class="meta">${tag(esc(plantShort(f.plant)))}<span>${f.cash ? fmt.pkr(f.cash) + ' cash' : money(f.pkr)}</span><span>· score ${scoreOf(f)}</span>${eff === true ? tag('Effective', 'good') : eff === false ? tag('Not effective', 'bad') : ''}</div>
             <div class="meta who">${ic('user')}<span>${esc(f.who)}</span></div>
             <div class="meta"><span>Due ${esc(a.due)}</span></div>
             <div class="row2"><span class="sp"></span>
-              ${next ? `<button class="btn sm ${next === 'approved' ? 'primary' : ''}" data-adv="${f.id}" ${blocked ? 'disabled title="Only CEO, Plant Head or Finance can approve"' : ''}>${ADV_LABEL[st]} ${ic('arrow')}</button>` : ''}
-              ${eff === false ? `<button class="btn sm" data-reopen="${f.id}">${ic('reset')} Reopen</button>` : ''}
+              ${next ? `<button class="btn sm ${next === 'approved' ? 'primary' : ''}" data-adv="${f.id}" ${blockWhy ? `disabled title="${esc(blockWhy)}"` : ''}>${ADV_LABEL[st]} ${ic('arrow')}</button>` : ''}
+              ${eff === false ? `<button class="btn sm" data-reopen="${f.id}" ${canAct(f) ? '' : `disabled title="${esc(whyCannot(f))}"`}>${ic('reset')} Reopen</button>` : ''}
             </div></div>`;
         }).join('') || '<div class="muted small" style="padding:8px 4px">Nothing here.</div>'}</section>`;
     }).join('');
-    const logRows = S.log.slice(0, 40).map(l => `<tr><td>${esc(new Date(l.t).toLocaleString())}</td><td>${esc(roleName(l.r))}</td><td class="wrap">${esc(l.e)}</td></tr>`).join('');
+    const logRows = S.log.slice(0, 40).map(l => `<tr><td>${esc(new Date(l.t).toLocaleString())}</td><td>${esc(l.u)} · ${esc(roleName(l.r))}</td><td class="wrap">${esc(l.e)}</td></tr>`).join('');
     return `${pageHead('Action Center', 'Every finding becomes a tracked corrective action (8D / CAPA). Actions move one gate at a time. Only approver roles can approve, and an action closes only when its measured result is entered and checked against the target.',
-      `<button class="btn sm" id="exportCsv">${ic('download')} Export CSV</button><button class="btn sm ghost" id="resetDemo">${ic('reset')} Reset demo data</button>`)}
-      ${hint(canApprove ? `<b>You can approve.</b> Start with "Needs approval": approving moves the fix to the owner's queue.` : `<b>Viewing as Department Head.</b> You can diagnose, start and verify work. Approval needs the CEO, Plant Head or Finance (switch role at the top).`)}
+      `<button class="btn sm" id="exportCsv">${ic('download')} Export CSV</button>${canAudit() ? `<button class="btn sm ghost" id="verifyChain">${ic('shield')} Check audit integrity</button>` : ''}`)}
+      ${hint(canApprove ? `<b>You can approve.</b> Start with "Needs approval": approving moves the fix to the owner's queue.` : `<b>Signed in as ${esc(roleName(S.user.role))}.</b> You can diagnose, start and verify work${S.user.plant !== 'all' ? ` for ${esc(plantShort(S.user.plant))}` : ''}. Approval needs the CEO, Plant Head or Finance.`)}
       <div class="grid g4">
         <div class="card stat rise"><span class="k-name">Open actions</span><span class="k-val">${countNum(list.length - cnt('verified'))}</span><span class="k-sub">of ${list.length}</span></div>
         <div class="card stat rise" style="--i:1"><span class="k-name">Waiting for approval</span><span class="k-val">${countNum(cnt('approve'))}</span><span class="k-sub">approver roles only</span></div>
@@ -564,50 +586,57 @@
       <div class="toolbar mt"><div class="chips">${chips}</div></div>
       <div class="kanban">${cols}</div>
       ${secT('Audit trail')}
-      <div class="card tw">${logRows ? `<table><thead><tr><th>When</th><th>Role</th><th>Event</th></tr></thead><tbody>${logRows}</tbody></table>` : '<div class="empty">No changes yet. Approvals, starts, verifications and reopenings will be recorded here with role and time.</div>'}</div>`;
+      <div class="card tw">${logRows ? `<table><thead><tr><th>When</th><th>Who</th><th>Event</th></tr></thead><tbody>${logRows}</tbody></table>` : canAudit() ? '<div class="empty">No changes yet. Approvals, starts, verifications and reopenings will be recorded here with role and time.</div>' : '<div class="empty">The full audit trail is visible to the CEO, Finance and administrators. Each action\'s own history is in its detail panel.</div>'}</div>`;
   }
 
+  /** Send one workflow change to the server; the server is the only authority on whether it is allowed. */
+  async function mutate(id, op, body, onOk) {
+    if (ui.busy) return;
+    ui.busy = true;
+    document.body.classList.add('busy');
+    try {
+      const res = await api(`/api/actions/${encodeURIComponent(id)}/${op}`, { method: 'POST', body: { ...body, version: S.actions[id].version } });
+      applyAction(res);
+      onOk(res.action);
+    } catch (e) {
+      if (e.status === 409 && e.data && e.data.action) { S.actions[id] = e.data.action; toast('Someone else changed this action just now. It has been refreshed; please check and try again.', 'bad'); }
+      else if (e.status !== 401) toast(e.message, 'bad');
+      if (e.status === 422 && op === 'transition' && body.to === 'verified') { const inp = $('#afterIn'); if (inp) { inp.setAttribute('aria-invalid', 'true'); inp.focus(); } return; }
+    } finally {
+      ui.busy = false;
+      document.body.classList.remove('busy');
+    }
+    if (ui.drawerFor === id) openFinding(id);
+    rerender();
+  }
   function advance(id) {
     const f = findingById(id), a = S.actions[id];
     if (!f || !a) return;
     const to = RCA.next(a.stage);
     if (!to) return;
     if (to === 'verified') { openFinding(id, true); return; }
-    const chk = RCA.canMove(a.stage, to, S.role);
-    if (!chk.ok) { toast(chk.why, 'bad'); return; }
-    a.stage = to;
-    a.d8 = a.d8.map((v, k) => v || k < D8_BY_STAGE[to]);
-    a.hist.push({ t: new Date().toISOString(), e: `${STAGE_NAME[to]} by ${roleName(S.role)}` });
-    logEv(`${f.id} "${f.title}" → ${STAGE_NAME[to]}`);
-    save();
-    toast(`${STAGE_NAME[to]}: ${f.title}`);
-    rerender();
+    mutate(id, 'transition', { to }, () => toast(`${STAGE_NAME[to]}: ${f.title}`));
   }
   function verify(id, raw) {
-    const f = findingById(id), a = S.actions[id];
+    const f = findingById(id);
     const v = util.toNum(raw);
-    const chk = RCA.canMove(a.stage, 'verified', S.role, { after: v === null ? '' : v });
-    if (!chk.ok) { toast(chk.why, 'bad'); const inp = $('#afterIn'); if (inp) { inp.setAttribute('aria-invalid', 'true'); inp.focus(); } return; }
-    a.after = v; a.stage = 'verified'; a.d8 = a.d8.map(() => true);
-    const eff = isEffective(f, a);
-    a.hist.push({ t: new Date().toISOString(), e: `Verified by ${roleName(S.role)}: ${f.kpi.name} = ${v} (${eff ? 'target met' : 'target missed'})` });
-    logEv(`${f.id} verified: ${f.kpi.name} ${v} vs target ${f.kpi.target} — ${eff ? 'effective' : 'NOT effective'}`);
-    save();
-    toast(eff ? `Fix verified as effective: ${f.kpi.name} reached ${v}.` : `Target missed (${v} vs ${f.kpi.target}). Reopen the action and look for another cause.`, eff ? '' : 'bad');
-    openFinding(id);
-    rerender();
+    if (v === null) { toast('Enter the measured after-value (a number of 0 or more) to verify the fix.', 'bad'); const inp = $('#afterIn'); if (inp) { inp.setAttribute('aria-invalid', 'true'); inp.focus(); } return; }
+    mutate(id, 'transition', { to: 'verified', after: v }, a => {
+      toast(a.effective ? `Fix verified as effective: ${f.kpi.name} reached ${v}.` : `Target missed (${v} vs ${f.kpi.target}). Reopen the action and look for another cause.`, a.effective ? '' : 'bad');
+    });
   }
   function reopen(id) {
-    const f = findingById(id), a = S.actions[id];
-    const chk = RCA.canReopen(a.stage, isEffective(f, a));
-    if (!chk.ok) { toast(chk.why, 'bad'); return; }
-    a.stage = chk.to; a.after = null; a.d8 = D8.map((_, k) => k < D8_BY_STAGE[chk.to]);
-    a.hist.push({ t: new Date().toISOString(), e: `Reopened by ${roleName(S.role)}: fix did not reach target` });
-    logEv(`${f.id} reopened (fix not effective)`);
-    save();
-    toast(`Reopened: ${f.title}`);
-    if (ui.drawerFor === id) openFinding(id);
-    rerender();
+    const f = findingById(id);
+    mutate(id, 'reopen', {}, () => toast(`Reopened: ${f.title}`));
+  }
+  function setD8(id, index, checked) {
+    mutate(id, 'd8', { index, checked }, () => {});
+  }
+  async function verifyChain() {
+    try {
+      const r = await api('/api/audit/verify');
+      toast(r.ok ? `Audit trail intact: ${r.count} entries, hash chain verified.` : `Audit trail BROKEN at entry #${r.brokenAt}. Investigate immediately.`, r.ok ? '' : 'bad');
+    } catch (e) { if (e.status !== 401) toast(e.status === 403 ? 'Only the CEO, Finance or an administrator can run the integrity check.' : e.message, 'bad'); }
   }
   function csvCell(v) {
     let s = String(v === null || v === undefined ? '' : v);
@@ -764,12 +793,16 @@
     const idx = RCA.STAGES.indexOf(a.stage);
     const next = RCA.next(a.stage);
     const eff = a.stage === 'verified' ? isEffective(f, a) : null;
-    const canApprove = ['ceo', 'plant', 'finance'].includes(S.role);
+    const canApprove = userCanApprove();
     const u = f.kpi.unit === '%' ? '%' : f.kpi.unit ? ' ' + f.kpi.unit : '';
     const hist = a.hist.slice().reverse().map(h => `<div><span>${esc(new Date(h.t).toLocaleString())}</span><b>${esc(h.e)}</b></div>`).join('');
-    const ctl = a.stage === 'in_progress' ? `<div class="blk"><b>Verify the result</b><div class="verify"><div><label class="f" for="afterIn">Measured ${esc(f.kpi.name)} after the fix (${esc(f.kpi.unit || 'value')}) · target ${esc(fmtVal(f.kpi.target))}${esc(u)}</label><input type="number" min="0" step="any" id="afterIn" ${focusVerify ? 'autofocus' : ''} placeholder="e.g. ${esc(String(f.kpi.target))}"></div><button class="btn primary" data-verify="${f.id}">${ic('check')} Verify</button></div><p class="small muted" style="margin:6px 0 0">The system compares this with the target. A missed target can be reopened.</p></div>`
-      : next ? `<div class="blk"><button class="btn primary" data-adv="${f.id}" ${next === 'approved' && !canApprove ? 'disabled title="Only CEO, Plant Head or Finance can approve"' : ''}>${ADV_LABEL[a.stage]} ${ic('arrow')}</button>${next === 'approved' && !canApprove ? '<p class="small muted">Approval needs the CEO, Plant Head or Finance role.</p>' : ''}</div>`
-        : eff === false ? `<div class="blk"><div class="callout">${ic('alert')}<div><b>Not effective.</b> ${esc(f.kpi.name)} is ${esc(fmtVal(a.after))}${esc(u)} against a target of ${esc(fmtVal(f.kpi.target))}${esc(u)}. Reopen it and trace the next cause.</div><button class="btn sm" data-reopen="${f.id}">${ic('reset')} Reopen</button></div></div>` : `<div class="blk"><div class="hint" style="border-color:rgba(52,211,153,.4)">${ic('check')}<div><b>Verified effective.</b> ${esc(f.kpi.name)} reached ${esc(fmtVal(a.after))}${esc(u)} (target ${esc(fmtVal(f.kpi.target))}${esc(u)}). Next monthly scan re-checks it for regression.</div></div></div>`;
+    const may = canAct(f);
+    const why = may ? '' : whyCannot(f);
+    const dis = why ? `disabled title="${esc(why)}"` : '';
+    const advWhy = why || (next === 'approved' && !canApprove ? 'Only CEO, Plant Head or Finance can approve' : '');
+    const ctl = a.stage === 'in_progress' ? `<div class="blk"><b>Verify the result</b><div class="verify"><div><label class="f" for="afterIn">Measured ${esc(f.kpi.name)} after the fix (${esc(f.kpi.unit || 'value')}) · target ${esc(fmtVal(f.kpi.target))}${esc(u)}</label><input type="number" min="0" step="any" id="afterIn" ${dis} ${focusVerify && may ? 'autofocus' : ''} placeholder="e.g. ${esc(String(f.kpi.target))}"></div><button class="btn primary" data-verify="${f.id}" ${dis}>${ic('check')} Verify</button></div><p class="small muted" style="margin:6px 0 0">${why ? esc(why) + '.' : 'The server compares this with the target and records it in the audit trail. A missed target can be reopened.'}</p></div>`
+      : next ? `<div class="blk"><button class="btn primary" data-adv="${f.id}" ${advWhy ? `disabled title="${esc(advWhy)}"` : ''}>${ADV_LABEL[a.stage]} ${ic('arrow')}</button>${advWhy ? `<p class="small muted">${esc(advWhy)}.</p>` : ''}</div>`
+        : eff === false ? `<div class="blk"><div class="callout">${ic('alert')}<div><b>Not effective.</b> ${esc(f.kpi.name)} is ${esc(fmtVal(a.after))}${esc(u)} against a target of ${esc(fmtVal(f.kpi.target))}${esc(u)}. Reopen it and trace the next cause.</div><button class="btn sm" data-reopen="${f.id}" ${dis}>${ic('reset')} Reopen</button></div></div>` : `<div class="blk"><div class="hint" style="border-color:rgba(52,211,153,.4)">${ic('check')}<div><b>Verified effective.</b> ${esc(f.kpi.name)} reached ${esc(fmtVal(a.after))}${esc(u)} (target ${esc(fmtVal(f.kpi.target))}${esc(u)}). Next monthly scan re-checks it for regression.</div></div></div>`;
     openDrawer(`<div class="chips">${tag(esc(f.id))}${tag(esc(plantShort(f.plant)))}${tag(esc(D.SECTIONS[f.sec].name))}${tag(esc(f.m6) + ' (6M)', 'acc')}${stageTag(a.stage)}</div>
       <h3 id="drawerTitle">${esc(f.title)}</h3><p class="lede">${esc(f.where)}</p>
       <div class="kv"><div><span>${f.cash ? 'Cash to release' : 'Leakage ' + esc(per().per)}</span><b>${f.cash ? fmt.pkr(f.cash) : money(f.pkr)}</b></div><div><span>Recoverable</span><b>${Math.round(f.rec * 100)}%</b></div><div><span>Priority score</span><b>${scoreOf(f)}</b></div></div>
@@ -777,7 +810,7 @@
       <div class="blk"><b>Measure of success</b><div class="kv"><div><span>Baseline</span><b>${esc(fmtVal(f.kpi.base))}${esc(u)}</b></div><div><span>Target</span><b>${esc(fmtVal(f.kpi.target))}${esc(u)}</b></div><div><span>After fix</span><b>${a.after === null ? '—' : esc(fmtVal(a.after)) + esc(u)}</b></div></div></div>
       <div class="blk"><div class="wsd"><div><b>Why (evidence)</b>${esc(f.why)}</div><div><b>So what</b>${esc(f.sowhat)}</div><div class="do"><b>Do what</b>${esc(f.dowhat)}</div><div><b>Who owns it</b>${esc(f.who)}</div><div><b>Confidence</b>${Math.round(f.conf * 100)}%. Based on linked ERP/MES/QC records (simulated in this prototype).</div></div></div>
       ${ctl}
-      <div class="blk"><b>8D checklist</b><div class="d8">${D8.map((l, k) => `<label><input type="checkbox" data-d8="${f.id}:${k}" ${a.d8[k] ? 'checked' : ''}> ${esc(l)}</label>`).join('')}</div></div>
+      <div class="blk"><b>8D checklist</b><div class="d8">${D8.map((l, k) => `<label><input type="checkbox" data-d8="${f.id}:${k}" ${a.d8[k] ? 'checked' : ''} ${may ? '' : 'disabled'}> ${esc(l)}</label>`).join('')}</div></div>
       <div class="blk"><div class="chips"><button class="btn sm" data-go="#/rca/node/${f.node}">${ic('tree')} Trace root cause</button><button class="btn sm" data-go="${secRoute(f.sec)}">${ic('factory')} Open ${esc(D.SECTIONS[f.sec].name)}</button></div></div>
       <div class="blk"><b>History</b><div class="timeline">${hist}</div></div>`, id);
   }
@@ -860,7 +893,7 @@
       if (i === steps.length) {
         setTimeout(() => {
           m.classList.remove('on'); $('#scrim').classList.remove('on');
-          S.lastScan = new Date().toISOString(); logEv('AI scan run'); save();
+          S.lastScan = new Date().toISOString();
           const t = totals(findingsFor());
           toast(`Scan complete: ${findingsFor().length} findings, ${money(t.leak)} ${per().per} leakage and ${fmt.pkr(t.cash)} cash to release, ranked by priority.`);
           rerender(true);
@@ -904,7 +937,7 @@
   function go(h) { if (location.hash === h) rerender(); else location.hash = h; }
   function renderNav(page) {
     const list = findingsFor();
-    const canApprove = ['ceo', 'plant', 'finance'].includes(S.role);
+    const canApprove = userCanApprove();
     const badge = list.filter(f => canApprove ? S.actions[f.id].stage === 'diagnosed' : ['approved', 'in_progress'].includes(S.actions[f.id].stage)).length;
     $('#nav').innerHTML = NAV.map(g => `<div class="nav-g">${esc(g.g)}</div>${g.items.map(([id, name, icon]) => `<a href="#/${id}" ${id === page ? 'aria-current="page"' : ''} title="${esc(name)}">${ic(icon)}<span>${esc(name)}</span>${id === 'actions' && badge ? `<span class="badge" aria-label="${badge} need attention">${badge}</span>` : ''}</a>`).join('')}`).join('');
   }
@@ -939,10 +972,9 @@
     setThemeIcon();
     $('#plantSel').innerHTML = D.PLANTS.map(p => `<option value="${p.id}" ${p.id === S.plant ? 'selected' : ''}>${esc(p.short)}</option>`).join('');
     $('#periodSel').innerHTML = PERIODS.map(p => `<option value="${p.id}" ${p.id === S.period ? 'selected' : ''}>${esc(p.name)}</option>`).join('');
-    $('#roleSel').innerHTML = D.ROLES.map(r => `<option value="${r.id}" ${r.id === S.role ? 'selected' : ''}>${esc(r.name)}</option>`).join('');
     $('#plantSel').addEventListener('change', e => { S.plant = e.target.value; save(); rerender(); toast(`Showing ${(D.PLANTS.find(p => p.id === S.plant) || {}).name}`); });
     $('#periodSel').addEventListener('change', e => { S.period = e.target.value; save(); rerender(); });
-    $('#roleSel').addEventListener('change', e => { S.role = e.target.value; save(); rerender(); toast(`Viewing as ${roleName(S.role)}`); });
+    $('#userBtn').addEventListener('click', openAccount);
     $('#themeBtn').addEventListener('click', () => {
       const t = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
       document.documentElement.dataset.theme = t;
@@ -965,7 +997,7 @@
     $('#pList').addEventListener('click', e => { const it = e.target.closest('[data-pi]'); if (it) pickPalette(+it.dataset.pi); });
 
     document.addEventListener('click', e => {
-      const t = e.target.closest('[data-go],[data-open],[data-term],[data-kpi],[data-adv],[data-reopen],[data-verify],[data-close],[data-gdom],[data-letter],[data-ldom],#exportCsv,#resetDemo,.nav a');
+      const t = e.target.closest('[data-go],[data-open],[data-term],[data-kpi],[data-adv],[data-reopen],[data-verify],[data-close],[data-gdom],[data-letter],[data-ldom],#exportCsv,#verifyChain,#signOut,.nav a');
       if ($('#side').classList.contains('open') && !e.target.closest('#side')) { $('#side').classList.remove('open'); $('#menuBtn').setAttribute('aria-expanded', 'false'); if (!t) return; }
       if (!t || t.disabled) return;
       if (t.matches('.nav a')) { $('#side').classList.remove('open'); $('#menuBtn').setAttribute('aria-expanded', 'false'); return; }
@@ -973,7 +1005,7 @@
       if (t.dataset.open) { openFinding(t.dataset.open); return; }
       if (t.dataset.term) { openTerm(t.dataset.term); return; }
       if (t.dataset.kpi) { openKpi(t.dataset.kpi); return; }
-      if (t.dataset.adv) { advance(t.dataset.adv); if (ui.drawerFor === t.dataset.adv) openFinding(t.dataset.adv); return; }
+      if (t.dataset.adv) { advance(t.dataset.adv); return; }
       if (t.dataset.reopen) { reopen(t.dataset.reopen); return; }
       if (t.dataset.verify) { verify(t.dataset.verify, ($('#afterIn') || {}).value); return; }
       if (t.dataset.close !== undefined) { closeOverlays(); return; }
@@ -981,9 +1013,8 @@
       if (t.dataset.letter !== undefined) { ui.gLetter = t.dataset.letter; glossaryList(); return; }
       if (t.dataset.ldom !== undefined) { ui.lDom = t.dataset.ldom; $$('[data-ldom]').forEach(c => c.classList.toggle('on', c.dataset.ldom === ui.lDom)); $('#llist').innerHTML = labList(); return; }
       if (t.id === 'exportCsv') { exportCsv(); return; }
-      if (t.id === 'resetDemo') {
-        if (window.confirm('Reset all actions, the 8D checklists and the audit trail to the demo starting point? This only affects this browser.')) { S.actions = seedAll(); S.log = []; S.lastScan = null; save(); rerender(); toast('Demo data reset'); }
-      }
+      if (t.id === 'verifyChain') { verifyChain(); return; }
+      if (t.id === 'signOut') { signOut(); return; }
     });
     document.addEventListener('input', e => {
       if (e.target.id === 'gq') { ui.gQ = e.target.value; glossaryList(); return; }
@@ -996,13 +1027,14 @@
       const d = e.target.dataset && e.target.dataset.d8;
       if (!d) return;
       const [id, k] = d.split(':');
-      const a = S.actions[id];
-      if (!a) return;
-      a.d8[+k] = e.target.checked;
-      a.hist.push({ t: new Date().toISOString(), e: `${D8[+k]} ${e.target.checked ? 'ticked' : 'unticked'} by ${roleName(S.role)}` });
-      save();
+      if (!S.actions[id] || ui.busy) { e.target.checked = !e.target.checked; return; }
+      setD8(id, +k, e.target.checked);
+    });
+    document.addEventListener('submit', e => {
+      if (e.target.id === 'pwForm') { e.preventDefault(); submitPassword(e.target); }
     });
     document.addEventListener('keydown', e => {
+      if (!S.user) return; // signed out: only the login form is active
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openPalette(); return; }
       if (e.key === '/' && !/input|textarea|select/i.test(document.activeElement.tagName)) { e.preventDefault(); openPalette(); return; }
       if (e.key === 'Escape') { closeOverlays(); return; }
@@ -1023,7 +1055,97 @@
     window.addEventListener('hashchange', () => rerender());
   }
 
-  initControls();
-  rerender();
+  // ---------------------------------------------------------------- sign-in, account and boot
+  let controlsReady = false;
+  function showLogin(msg) {
+    closeOverlays();
+    S.user = null;
+    $('#userBtn').hidden = true;
+    const el = $('#login');
+    el.innerHTML = `<form class="login-card glass" id="loginForm" method="post" action="/" novalidate aria-labelledby="loginTitle">
+      <div class="brand"><span class="logo">${ic('logo')}</span><div><b>Textile AI Audit</b><small>Root-cause control tower</small></div></div>
+      <h2 id="loginTitle">Sign in</h2>
+      <p class="muted small">Use the account your administrator created for you. Every change you make is recorded in a tamper-evident audit trail.</p>
+      <div class="login-msg" role="alert" ${msg ? '' : 'hidden'}>${esc(msg || '')}</div>
+      <label class="f" for="lgUser">Username</label><input id="lgUser" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required maxlength="64">
+      <label class="f" for="lgPass">Password</label><input id="lgPass" name="password" type="password" autocomplete="current-password" required maxlength="256">
+      <button class="btn primary" type="submit" id="lgBtn">Sign in ${ic('arrow')}</button>
+    </form>`;
+    // Bound here, not in initControls: the form exists before the app's global listeners do.
+    $('#loginForm').addEventListener('submit', e => { e.preventDefault(); submitLogin(e.currentTarget); });
+    el.hidden = false;
+    document.body.classList.add('locked');
+    setTimeout(() => { const u = $('#lgUser'); if (u) u.focus(); }, 30);
+  }
+  function loginError(text) {
+    const m = $('#loginForm .login-msg');
+    m.textContent = text; m.hidden = false;
+  }
+  async function submitLogin(form) {
+    const username = form.username.value.trim(), password = form.password.value;
+    if (!username || !password) { loginError('Enter your username and password.'); return; }
+    const btn = $('#lgBtn'); btn.disabled = true;
+    try {
+      await api('/api/login', { method: 'POST', body: { username, password }, quiet401: true });
+      form.password.value = '';
+      await loadState();
+    } catch (e) {
+      loginError(e.status === 401 ? 'Wrong username or password.' : e.message);
+      form.password.value = ''; form.password.focus();
+    } finally { btn.disabled = false; }
+  }
+  async function loadState() {
+    const st = await api('/api/state', { quiet401: true });
+    const first = !S.user;
+    applyState(st);
+    let hadPref = false; try { hadPref = !!localStorage.getItem(PREF_KEY); } catch (e) { /* ignore */ }
+    if (first && S.user.plant !== 'all' && !hadPref) { S.plant = S.user.plant; save(); }
+    $('#login').hidden = true; $('#login').innerHTML = '';
+    document.body.classList.remove('locked');
+    if (!controlsReady) { initControls(); controlsReady = true; }
+    $('#plantSel').value = S.plant;
+    renderUserBtn();
+    rerender(true);
+  }
+  function renderUserBtn() {
+    const b = $('#userBtn');
+    b.innerHTML = `${ic('user')}<span class="lbl"><b>${esc(S.user.displayName)}</b><small>${esc(roleName(S.user.role))} · ${esc(S.user.plant === 'all' ? 'All plants' : plantShort(S.user.plant))}</small></span>`;
+    b.setAttribute('aria-label', `Account: ${S.user.displayName}`);
+    b.hidden = false;
+  }
+  function openAccount() {
+    if (!S.user) return;
+    const u = S.user;
+    const scope = u.plant === 'all' ? 'in every plant' : `in ${esc(plantShort(u.plant))} only`;
+    const can = VIEW_ROLES.includes(u.role)
+      ? `Move corrective actions ${scope}${userCanApprove() ? ', including approvals' : ' (approval needs the CEO, Plant Head or Finance)'}.`
+      : 'View dashboards. This account type cannot change corrective actions.';
+    openDrawer(`<h3 id="drawerTitle">${esc(u.displayName)}</h3><p class="lede">${esc(u.username)} · ${esc(roleName(u.role))} · ${esc(u.plant === 'all' ? 'All plants' : plantShort(u.plant))}</p>
+      <div class="blk"><b>What you can do</b><p class="small">${can}</p></div>
+      <form class="blk" id="pwForm" novalidate><b>Change password</b>
+        <label class="f" for="pwOld">Current password</label><input id="pwOld" name="current" type="password" autocomplete="current-password" required maxlength="256">
+        <label class="f" for="pwNew">New password (at least 12 characters)</label><input id="pwNew" name="next" type="password" autocomplete="new-password" required minlength="12" maxlength="256">
+        <div class="chips mt"><button class="btn primary" type="submit">Update password</button></div>
+        <p class="small muted">Changing it signs you out on every other device.</p>
+      </form>
+      <div class="blk"><button class="btn" id="signOut">${ic('arrow')} Sign out</button></div>`, null);
+  }
+  async function submitPassword(form) {
+    const current = form.current.value, next = form.next.value;
+    if (next.length < 12) { toast('The new password needs at least 12 characters.', 'bad'); form.next.focus(); return; }
+    try {
+      await api('/api/me/password', { method: 'POST', body: { current, next }, quiet401: true });
+      form.reset(); toast('Password updated. Other sessions were signed out.');
+    } catch (e) { toast(e.message, 'bad'); }
+  }
+  async function signOut() {
+    try { await api('/api/logout', { method: 'POST', quiet401: true }); } catch (e) { /* already signed out */ }
+    showLogin('You have signed out.');
+  }
+  // The app never uses query strings; drop any (e.g. from an old native form submit) so nothing sensitive stays in history.
+  if (location.search) history.replaceState(null, '', location.pathname + location.hash);
+  (async function boot() {
+    try { await loadState(); } catch (e) { showLogin(e.status === 401 ? '' : e.message); }
+  })();
   window.__TA_APP__ = { state: S, go, rerender }; // exposed for E2E checks only
 })();
