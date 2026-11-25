@@ -13,7 +13,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const { loadConfig } = require('../../server/config.js');
-const ENV_KEYS = ['NODE_ENV', 'DB_URL', 'DB_AUTH_TOKEN', 'DB_PATH', 'VERCEL', 'PUBLIC_ORIGIN', 'TRUST_PROXY', 'SECURE_COOKIES'];
+const ENV_KEYS = ['NODE_ENV', 'DB_URL', 'DB_AUTH_TOKEN', 'TURSO_DATABASE_URL', 'TURSO_AUTH_TOKEN', 'VERCEL_ENV', 'VERCEL_PROJECT_PRODUCTION_URL', 'DB_PATH', 'VERCEL', 'PUBLIC_ORIGIN', 'TRUST_PROXY', 'SECURE_COOKIES'];
 
 function freshEntry(env) {
   const saved = Object.fromEntries(ENV_KEYS.map(k => [k, process.env[k]]));
@@ -124,6 +124,28 @@ describe('DB_URL validation', () => {
   it('accepts a bare Turso host, with or without a port', () => {
     assert.equal(loadConfig({ ...env, DB_URL: 'libsql://audit-me.turso.io' }).dbPath, 'libsql://audit-me.turso.io');
     assert.ok(loadConfig({ ...env, DB_URL: 'https://audit-me.turso.io:443/' }));
+  });
+  it("accepts the names Vercel's Turso integration sets (TURSO_DATABASE_URL / TURSO_AUTH_TOKEN); DB_* wins", () => {
+    const t = loadConfig({ TURSO_DATABASE_URL: 'libsql://from-integration.turso.io', TURSO_AUTH_TOKEN: 'tok' });
+    assert.equal(t.dbPath, 'libsql://from-integration.turso.io');
+    assert.equal(t.dbAuthToken, 'tok');
+    const both = loadConfig({ DB_URL: 'libsql://mine.turso.io', DB_AUTH_TOKEN: 'mine', TURSO_DATABASE_URL: 'libsql://other.turso.io', TURSO_AUTH_TOKEN: 'other' });
+    assert.deepEqual([both.dbPath, both.dbAuthToken], ['libsql://mine.turso.io', 'mine']);
+    assert.throws(() => loadConfig({ TURSO_DATABASE_URL: 'libsql://x.turso.io?authToken=1', TURSO_AUTH_TOKEN: 'tok' }), /TURSO_DATABASE_URL|DB_URL/);
+    assert.throws(() => loadConfig({ TURSO_DATABASE_URL: 'libsql://x.turso.io' }), /AUTH_TOKEN/);
+  });
+  it('on a Vercel production deploy, works out production mode, the site address and proxy trust by itself', () => {
+    const vercel = { VERCEL: '1', VERCEL_ENV: 'production', VERCEL_PROJECT_PRODUCTION_URL: 'audit-system-theta.vercel.app', TURSO_DATABASE_URL: 'libsql://db.turso.io', TURSO_AUTH_TOKEN: 'tok' };
+    const c = loadConfig(vercel);
+    assert.equal(c.production, true);
+    assert.equal(c.publicOrigin, 'https://audit-system-theta.vercel.app');
+    assert.equal(c.trustProxy, true, 'Vercel overwrites X-Forwarded-For with the real client address');
+    assert.equal(c.secureCookies, true);
+    // Explicit settings still win.
+    const own = loadConfig({ ...vercel, PUBLIC_ORIGIN: 'https://audit.example.com', TRUST_PROXY: 'false' });
+    assert.deepEqual([own.publicOrigin, own.trustProxy], ['https://audit.example.com', false]);
+    // Off Vercel nothing is assumed.
+    assert.throws(() => loadConfig({ NODE_ENV: 'production', PUBLIC_ORIGIN: 'https://audit.example.com' }), /TRUST_PROXY/);
   });
   it('rejects anything with credentials, a query, a path or odd characters', () => {
     for (const bad of ['libsql://user:pw@audit.turso.io', 'libsql://audit.turso.io?authToken=x', 'libsql://audit.turso.io/db', 'libsql://audit_turso.io#x', 'http://audit.turso.io', 'file:/etc/passwd']) {

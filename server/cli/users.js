@@ -4,7 +4,7 @@
  *   npm run user:reset  -- --username ayesha
  *   npm run user:disable -- --username ayesha
  *   npm run user:list
- * Works on the local database file, or on the hosted Turso database when DB_URL and DB_AUTH_TOKEN are set.
+ * Works on the local database file, or on the hosted Turso database when DB_URL and DB_AUTH_TOKEN (or TURSO_DATABASE_URL and TURSO_AUTH_TOKEN) are set.
  * A strong one-time password is generated and printed once, unless TA_PASSWORD is set. */
 const { loadConfig } = require('../config');
 const { openDb } = require('../db');

@@ -13,7 +13,7 @@ The backend uses Node.js built-ins plus one dependency, the official libSQL clie
 ```powershell
 node --version          # needs 22.13 or newer
 npm install             # one dependency: @libsql/client
-npm test                # 330 tests: 227 unit + 103 integration (API, security, records, database, multi-instance, Vercel entry)
+npm test                # 332 tests: 227 unit + 105 integration (API, security, records, database, multi-instance, Vercel entry)
 npm run user:create -- --username ayesha --name "Ayesha Khan" --role ceo --plant all
 npm run dev             # http://127.0.0.1:5174 using dev.env (database in data/dev.db)
 ```
@@ -127,25 +127,21 @@ All writes need `Content-Type: application/json`. Browser requests must come fro
 
 Vercel serves the dashboard from its CDN and runs the API as a function (`api/index.js`). Vercel keeps no files between requests, so the data lives in a hosted Turso database. Several Vercel instances can run at once; sessions, sign-in lockouts and the measured-KPI cache version are all kept in the database, so the instances always agree.
 
-1. **Create the database (Turso, free plan).** Sign up at turso.tech, then in the Turso dashboard (or with the `turso` CLI) create a database. Put it in the same region as your Vercel functions (Vercel → Settings → Functions → *Function Region*; the default is Washington, D.C., `iad1`). For users in Pakistan, pick Mumbai on both sides if both offer it. Copy two values:
-   - the database URL, which looks like `libsql://textile-audit-yourname.turso.io`
-   - an auth token: Database → *Create token* (read & write), or `turso db tokens create textile-audit`. Treat the token like a password.
-2. **Set the Vercel environment variables.** Vercel project → Settings → Environment Variables. Tick **Production only**: a Preview deployment (every pushed branch) given the same values would read and write the live database.
+1. **Connect a Turso database (free plan) through Vercel.** Vercel project → *Storage* → *Create Database* (or the Vercel Marketplace) → **Turso**. Sign in or sign up with Turso there, create a database and connect it to this project for **Production only**: a Preview deployment (every pushed branch) connected to the same database would read and write live data. Put the database in the same region as your Vercel functions (Vercel → Settings → Functions → *Function Region*; the default is Washington, D.C., `iad1`). The integration adds `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` to the project; nobody has to copy the token by hand.
+2. **Nothing else is required on Vercel.** On a production deployment the server works out the rest from Vercel's own variables: production mode (`VERCEL_ENV`), the site address (`VERCEL_PROJECT_PRODUCTION_URL`, used for the CSRF origin check) and proxy trust (Vercel overwrites `X-Forwarded-For` with the visitor's address). Set these only to override:
 
-   | Name | Value |
+   | Name | When |
    |---|---|
-   | `DB_URL` | the `libsql://…` URL |
-   | `DB_AUTH_TOKEN` | the token (mark it *Sensitive*) |
-   | `NODE_ENV` | `production` |
-   | `PUBLIC_ORIGIN` | your site address exactly, e.g. `https://audit-system-theta.vercel.app` |
-   | `TRUST_PROXY` | `true` (Vercel sets the visitor's IP in `X-Forwarded-For`). If you put another proxy or CDN such as Cloudflare in front of Vercel, the address Vercel sees is that proxy's, so every visitor shares one sign-in limit; don't add one without adjusting this. |
+   | `PUBLIC_ORIGIN` | users reach the site through another address, e.g. a custom domain that is not the project's production domain |
+   | `TRUST_PROXY` | `false` if you put another proxy or CDN such as Cloudflare in front of Vercel; otherwise every visitor shares that proxy's sign-in limit |
+   | `DB_URL` + `DB_AUTH_TOKEN` | you created the Turso database yourself instead of through the integration (they win over the `TURSO_*` names) |
 
 3. **Deploy.** Push to the GitHub repository connected to Vercel, or press *Redeploy*. `vercel.json` already sets the build (`node scripts/build-static.js` → `public/`), the `/api/*` rewrite and the security headers. On its first request the API creates all the tables in Turso. If you deploy with the `vercel` CLI from this folder instead, `.vercelignore` keeps `data/`, `.env*`, tests and docs out of the upload.
-4. **Create the first users** from your own computer, against the Turso database. Put the two values in a file named `.env.turso` in the project folder. It is gitignored; never commit it.
+4. **Create the first users** from your own computer, against the Turso database. Copy the two values (Vercel → Storage → your Turso database → *.env.local* tab, or the Turso dashboard) into a file named `.env.turso` in the project folder. It is gitignored; never commit it.
 
    ```text
-   DB_URL=libsql://textile-audit-yourname.turso.io
-   DB_AUTH_TOKEN=paste-the-token-here
+   TURSO_DATABASE_URL=libsql://textile-audit-yourname.turso.io
+   TURSO_AUTH_TOKEN=paste-the-token-here
    ```
 
    Then:

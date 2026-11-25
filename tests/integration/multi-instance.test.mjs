@@ -21,7 +21,7 @@ const TODAY = new Date().toISOString().slice(0, 10);
 const spawned = []; // every child, so cleanup also stops one whose sibling failed to start
 function startServer(dbFile) {
   const env = { ...process.env, NODE_ENV: 'development', HOST: '127.0.0.1', PORT: '0', DB_PATH: dbFile };
-  for (const k of ['DB_URL', 'DB_AUTH_TOKEN', 'VERCEL', 'PUBLIC_ORIGIN', 'TRUST_PROXY', 'SECURE_COOKIES']) delete env[k];
+  for (const k of ['DB_URL', 'DB_AUTH_TOKEN', 'TURSO_DATABASE_URL', 'TURSO_AUTH_TOKEN', 'VERCEL', 'VERCEL_ENV', 'PUBLIC_ORIGIN', 'TRUST_PROXY', 'SECURE_COOKIES']) delete env[k];
   const proc = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', path.join(ROOT, 'server', 'index.js')], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   spawned.push(proc);
   return new Promise((resolve, reject) => {
