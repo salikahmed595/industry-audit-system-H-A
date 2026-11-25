@@ -588,3 +588,33 @@ body.locked .app { filter: blur(3px); pointer-events: none; user-select: none; }
 body.busy { cursor: progress; }
 body.busy [data-adv], body.busy [data-verify], body.busy [data-reopen] { pointer-events: none; opacity: .6; }
 @media (max-width: 780px) { .user-btn .lbl { display: none; } .user-btn { padding: 0 9px; } }
+
+/* ---------- measured vs not measured (ground truth from approved records) ---------- */
+.kpi.nm .k-val { color: var(--faint); }
+.k-bm .need, .k-bm .stale { color: var(--warn); font-weight: 600; }
+.k-val.nm { font-size: 17px; color: var(--faint); }
+.st-node.nm { opacity: .72; }
+.rings { display: flex; gap: 14px; flex-wrap: wrap; justify-content: center; }
+ul.evid { margin: 10px 0 0; padding-left: 18px; font-size: 13px; color: var(--muted); }
+ul.evid li { margin: 5px 0; }
+ul.evid li b { color: var(--text); margin-right: 4px; }
+ul.evid li.sig b { color: var(--bad); }
+.mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12.5px; }
+
+/* ---------- data entry ---------- */
+.entry h3 .sub { font-weight: 500; }
+.ef-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 12px 14px; margin-top: 10px; }
+.ef-f { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.ef-f select, .ef-f input[type="date"] { background: var(--glass); border: 1px solid var(--stroke); border-radius: 12px; padding: 9px 12px; width: 100%; outline: none; }
+.ef-f select:focus, .ef-f input[type="date"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(139, 155, 255, .2); }
+.ef-f select option { background: var(--bg0); color: var(--text); }
+.ef-f .help { color: var(--faint); font-size: 11.5px; }
+.ferr { color: var(--bad); font-size: 12px; font-weight: 600; }
+.req { color: var(--bad); }
+.ef-msg { margin-top: 12px; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--bad); font-size: 13px; }
+.entry [aria-invalid="true"], #recNote[aria-invalid="true"] { border-color: var(--bad); box-shadow: 0 0 0 3px rgba(248, 113, 113, .25); }
+.kv.rec { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+#recNote { margin-top: 4px; resize: vertical; }
+
+/* the hidden attribute always wins over component display rules */
+[hidden] { display: none !important; }

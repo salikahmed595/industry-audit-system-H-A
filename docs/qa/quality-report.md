@@ -83,3 +83,67 @@ The findings above describe the static prototype **before** the backend was buil
 ## Known limits
 1. Benchmarks are labelled verified / vendor-reported / practitioner norm on the Benchmarks page.
 2. The glossary's EOQ worked example is internally inconsistent. The Lab uses holding cost 1,000 so the result matches its 3,464 kg answer (noted on the card).
+
+## Ground-truth measurement build (2026-11-25)
+
+Goal (user): KPIs must reflect the factory's real state ("ground reality"), entered manually by each department's staff, measured without AI. A KPI with no data shows **Not measured**, never a demo value.
+
+### What was built
+| Slice | Files | Evidence |
+|---|---|---|
+| Form catalogue (16 forms), shared validation, 86 KPI formulas, statistics (XmR control chart, OLS trend t, Welch t-test, stratification, Pareto, robust outlier flags), coverage, PKR impact | `js/measure.js` | `tests/unit/measure.test.mjs`: 42 tests. Golden values: t-table p(2.228, 10) ≈ 0.05; textbook Welch t ≈ −2.46, p ≈ 0.021; impact 3% × 30,000 m × PKR 500 |
+| Migration 2: `operator` role, `department` column, `records` table, duplicate-prevention unique index, immutability and no-delete triggers | `server/db.js`, `server/users.js`, `server/cli/users.js` | integration test upgrades a v1 database: users and sessions kept, `foreign_key_check` clean |
+| Maker-checker records API, measured API | `server/records.js`, `server/measured.js`, `server/app.js` | `tests/integration/records.test.mjs`: 24 tests covering scope 403s, self-approval ban, 409 duplicate and version conflicts, reject note, DB trigger, approved-only measurement, void, operator and feed denied on `/api/measured`, outlier flag, audit entries |
+| Dashboard: Data Entry page (forms, inline errors, approval queue, review drawer), Not-measured tiles, measured trends, findings and evidence, coverage ring, measured value stream, benchmarks, Data & Governance coverage | `js/app.js`, `css/styles.css`, `index.html` | browser E2E below |
+
+TDD note: the `js/measure.js` unit tests were written after the module, so they never ran RED. The server slice (records, measured, migration) followed RED → GREEN.
+
+### Executed
+- `npm test`: **292 tests, 292 pass, 0 fail** (222 unit + 70 integration), after the security fixes below.
+- Browser E2E on localhost (built-in browser, dev database, two test users created for the run):
+  - Operator (spinning, FSD) sees only Data Entry, Formula Lab and Glossary. Dashboard routes fall back to Data Entry, and the plant/period/refresh controls are hidden.
+  - Empty submit: 5 inline field errors, focus moves to the first one, nothing saved.
+  - Valid spinning shift submit saves R1 as "Waiting approval". The measured fields clear; shift and machine stay.
+  - Re-submitting the same shift and machine is refused with "already entered (record R1)".
+  - The operator's record drawer has no approve/reject buttons.
+  - Head (spinning, FSD): the nav badge shows 1 waiting, and the hero offers "1 record waiting for your approval".
+  - Reject without a note: blocked, field marked invalid.
+  - Approve: toast shown, queue empty, badge cleared.
+  - Spinning page: Yarn yield **86%** (860/1000) and Spinning waste **14%** (140/1000), "Measured from 1 approved record". Both appear as measured findings with evidence; the other 8 tiles show "Not measured · Needs: Spinning shift report".
+  - A measured value takes priority over the earlier live-feed test value (81.5).
+  - All 16 routes render with no runtime errors.
+  - The KPI drawer shows the source, formula and evidence.
+  - Search palette shows measured values and the forms.
+  - Refresh measurements recalculates and toasts the coverage.
+  - At 375 px the entry form is one column with no horizontal overflow.
+
+### Defects found and fixed during E2E
+- The `hidden` attribute did not hide `.btn`/`.sel` controls (component `display` won). Fixed with a global `[hidden] { display: none !important; }`.
+- A restricted user's URL stayed on `#/command` while showing Data Entry. Fixed by replacing the hash with the real page.
+- The health ring scored a live-feed value while coverage said "nothing measured". Coverage now counts feed-filled KPIs separately (`feed`), and the hero names them.
+- Evidence label text ran together ("Measured:Measured"), and the toast said "1 approved records". Both fixed.
+
+### Not done / open risks
+- **Load testing: NOT EXECUTED.** `/api/measured` recalculates on each request with no cache. Cost grows with approved records in the window. Measure before rolling out to many plants.
+- No automated browser test suite. The E2E runs above were scripted by hand in the built-in browser and are not in CI.
+- Measured findings are statistical signals, not confirmed root causes. The 8D step still needs a person.
+- Playbook findings (`js/data.js`) stay as labelled baseline estimates.
+
+### Independent security review (separate reviewer agent, static read of the code, no exploits run)
+No P0 or P1 findings. Each fix was done RED → GREEN: the test was written first, failed, then passed.
+
+| # | Finding | Severity | Action | Test |
+|---|---|---|---|---|
+| 1 | `GET /api/kpis` had no role check, so operators and feeds could read dashboard data | P2 | Fixed: dashboard roles only | `only dashboard readers can read the KPI feed` |
+| 2 | `/api/measured` ignored the caller's plant | P2 | Fixed: scoped users get their own plant, other plants return `403`, and the plant picker shows only their plant | `plant-scoped readers only get the measured KPIs of their own plant`, plus a browser check |
+| 3 | The same dye lot, PO or lay could be entered again under another date (double counting) | P2 | Fixed: event forms with their own number are keyed without the date | unit test, plus `the same purchase order cannot be entered again…` |
+| 7 | The duplicate check could be beaten with case, spacing, punctuation or full-width letters | P3 | Fixed: keys are normalised (NFKC, letters and digits only) | unit test `duplicate keys ignore case, spacing…` |
+| 8 | DB triggers did not cover status, review fields, ids, rows inserted as approved, or `INSERT OR REPLACE` | P3 | Fixed: migration 3 adds status-flow, review-frozen, id and insert triggers, and `recursive_triggers` is on | `the database refuses status changes that skip the workflow…` |
+| 5 | `/api/measured` recalculated everything on every request | P2 | Mitigated: cache per plant, period and day, cleared on approve or void | `measured results refresh as soon as a record is approved` |
+| 4 | No per-user submission cap; lists stop at 200 with no paging | P2 | **Open**, documented in README known limits | — |
+| 6 | Shared forms (defects, downtime) are not tied to the enterer's department | P3 | **Accepted by design**: maintenance and quality log events for every area | — |
+| 9, 10 | 404 vs 403 reveals which record ids exist; refused review attempts are not audited | P3 | **Open**, low impact | — |
+
+The reviewer also checked these and found them OK: parameterised SQL (including the dynamic IN lists), prototype-pollution handling, escaping of every record-derived string in the UI (stored XSS), numeric and date validation, the order of review authorisation checks, the version race inside `BEGIN IMMEDIATE`, audit atomicity, body limits, and the safety of migration 2.
+
+Load / performance test: **NOT EXECUTED**.

@@ -3,29 +3,34 @@
 const D = require('../js/data.js');
 const { hashPassword, passwordProblem } = require('./security');
 
-const ROLES = ['ceo', 'plant', 'dept', 'finance', 'admin', 'integration'];
+const ROLES = ['ceo', 'plant', 'dept', 'finance', 'admin', 'integration', 'operator'];
+const DEPARTMENTS = Object.keys(D.SECTIONS); // spinning, weaving, ... finance
+const NEEDS_DEPT = ['dept', 'operator'];
 const PLANTS = D.PLANTS.map(p => p.id); // 'all', 'FSD', 'KHI', 'LHR', 'GRP'
 const USERNAME_RE = /^[a-z0-9][a-z0-9._-]{1,47}$/i;
 
 class ValidationError extends Error {}
 
-const pub = r => (r ? { id: r.id, username: r.username, displayName: r.display_name, role: r.role, plant: r.plant } : null);
+const pub = r => (r ? { id: r.id, username: r.username, displayName: r.display_name, role: r.role, plant: r.plant, department: r.department || null } : null);
 
 function makeUsers(db, clock) {
   const iso = () => new Date(clock()).toISOString();
 
-  async function create({ username, displayName, role, plant, password }) {
+  async function create({ username, displayName, role, plant, department = null, password }) {
     if (typeof username !== 'string' || !USERNAME_RE.test(username)) throw new ValidationError('Username: 2-48 letters, digits, dot, dash or underscore.');
     if (!ROLES.includes(role)) throw new ValidationError(`Role must be one of: ${ROLES.join(', ')}`);
     if (!PLANTS.includes(plant)) throw new ValidationError(`Plant must be one of: ${PLANTS.join(', ')}`);
+    if (department !== null && department !== undefined && !DEPARTMENTS.includes(department)) throw new ValidationError(`Department must be one of: ${DEPARTMENTS.join(', ')}`);
+    if (role === 'operator' && !department) throw new ValidationError('An operator needs a department (--department).');
+    const dept = NEEDS_DEPT.includes(role) ? department || null : null;
     const name = typeof displayName === 'string' && displayName.trim() ? displayName.trim().slice(0, 80) : username;
     const problem = passwordProblem(password);
     if (problem) throw new ValidationError(problem);
     if (db.prepare('SELECT 1 FROM users WHERE username = ?').get(username)) throw new ValidationError('That username already exists.');
     const hash = await hashPassword(password);
     const now = iso();
-    const r = db.prepare('INSERT INTO users (username, display_name, role, plant, pass_hash, created_at, pw_changed_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(username, name, role, plant, hash, now, now);
+    const r = db.prepare('INSERT INTO users (username, display_name, role, plant, department, pass_hash, created_at, pw_changed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(username, name, role, plant, dept, hash, now, now);
     return pub(db.prepare('SELECT * FROM users WHERE id = ?').get(r.lastInsertRowid));
   }
 
@@ -44,4 +49,4 @@ function makeUsers(db, clock) {
   return { create, byUsername, byId, setPassword, setActive, list, pub };
 }
 
-module.exports = { makeUsers, ValidationError, ROLES, PLANTS };
+module.exports = { makeUsers, ValidationError, ROLES, PLANTS, DEPARTMENTS };

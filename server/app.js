@@ -7,6 +7,9 @@ const audit = require('./audit');
 const { makeUsers, ValidationError } = require('./users');
 const { makeActions } = require('./actions');
 const { makeKpis } = require('./kpis');
+const { makeRecords } = require('./records');
+const { makeMeasured } = require('./measured');
+const M = require('../js/measure.js');
 const { HttpError } = require('./errors');
 const sec = require('./security');
 const { securityHeaders, sendJson, readJson, buildStaticMap, serveStatic, parseCookies } = require('./http');
@@ -17,6 +20,7 @@ const IP_MAX_FAILURES = 50;
 const MAX_TRACKED = 10000; // cap on throttle entries held in memory
 const AUDIT_VIEWERS = ['ceo', 'finance', 'admin'];
 const INGESTERS = ['integration', 'admin'];
+const DASHBOARD_READERS = ['ceo', 'plant', 'dept', 'finance', 'admin']; // operators and feeds only enter data
 
 function createApp(options = {}) {
   const cfg = { ...DEFAULTS, ...options };
@@ -26,6 +30,8 @@ function createApp(options = {}) {
   const users = makeUsers(db, clock);
   const actions = makeActions(db, clock);
   const kpis = makeKpis(db, clock);
+  const records = makeRecords(db, clock);
+  const measured = makeMeasured(records, clock);
   actions.seedIfEmpty();
   const statics = buildStaticMap();
   const cookieName = cfg.secureCookies ? '__Host-ta_sid' : 'ta_sid';
@@ -141,7 +147,8 @@ function createApp(options = {}) {
 
     const user = requireUser(req);
 
-    if (m === 'GET' && pathname === '/api/me') return sendJson(res, 200, { user: users.pub(user) });
+    const me = () => ({ ...users.pub(user), forms: M.formsFor(user), reviewForms: M.reviewableForms(user), pendingReviews: records.pendingFor(user), canReadDashboards: DASHBOARD_READERS.includes(user.role) });
+    if (m === 'GET' && pathname === '/api/me') return sendJson(res, 200, { user: me() });
 
     if (m === 'POST' && pathname === '/api/me/password') {
       const body = await readJson(req);
@@ -157,7 +164,8 @@ function createApp(options = {}) {
     }
 
     if (m === 'GET' && pathname === '/api/state') {
-      return sendJson(res, 200, { user: users.pub(user), actions: actions.all(), log: logFor(user), kpis: kpis.latest(), serverTime: iso() });
+      const reader = DASHBOARD_READERS.includes(user.role);
+      return sendJson(res, 200, { user: me(), actions: reader ? actions.all() : [], log: logFor(user), kpis: reader ? kpis.latest() : [], serverTime: iso() });
     }
 
     const am = pathname.match(/^\/api\/actions\/(F\d{2,3})\/(transition|reopen|d8)$/);
@@ -179,7 +187,17 @@ function createApp(options = {}) {
       return sendJson(res, 200, audit.verify(db));
     }
 
-    if (m === 'GET' && pathname === '/api/kpis') return sendJson(res, 200, { kpis: kpis.latest() });
+    // ---- department records (maker-checker) and measured KPIs ----
+    if (m === 'POST' && pathname === '/api/records') return sendJson(res, 201, { record: records.submit(user, await readJson(req)) });
+    if (m === 'GET' && pathname === '/api/records') return sendJson(res, 200, { records: records.list(user, query) });
+    const rm = pathname.match(/^\/api\/records\/(\d{1,12})\/review$/);
+    if (m === 'POST' && rm) return sendJson(res, 200, { record: records.review(user, Number(rm[1]), await readJson(req)) });
+    if (m === 'GET' && pathname === '/api/measured') {
+      requireRole(user, DASHBOARD_READERS);
+      return sendJson(res, 200, measured.get(query, user));
+    }
+
+    if (m === 'GET' && pathname === '/api/kpis') { requireRole(user, DASHBOARD_READERS); return sendJson(res, 200, { kpis: kpis.latest() }); }
     if (m === 'POST' && pathname === '/api/kpis/ingest') {
       requireRole(user, INGESTERS);
       return sendJson(res, 200, kpis.ingest(user, await readJson(req)));
@@ -214,7 +232,7 @@ function createApp(options = {}) {
   server.headersTimeout = 15e3;
 
   return {
-    db, users, actions, kpis, server, config: cfg,
+    db, users, actions, kpis, records, server, config: cfg,
     listen(port = 0, host = '127.0.0.1') {
       return new Promise((resolve, reject) => {
         server.once('error', reject);

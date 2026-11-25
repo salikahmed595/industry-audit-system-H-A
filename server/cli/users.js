@@ -7,7 +7,7 @@
  * A strong one-time password is generated and printed once, unless TA_PASSWORD is set. */
 const { loadConfig } = require('../config');
 const { openDb } = require('../db');
-const { makeUsers, ValidationError, ROLES, PLANTS } = require('../users');
+const { makeUsers, ValidationError, ROLES, PLANTS, DEPARTMENTS } = require('../users');
 const audit = require('../audit');
 const { randomPassword } = require('../security');
 
@@ -27,9 +27,9 @@ async function main() {
   try {
     if (cmd === 'create') {
       const password = process.env.TA_PASSWORD || randomPassword();
-      const u = await users.create({ username: a.username, displayName: a.name, role: a.role, plant: a.plant || 'all', password });
-      log('admin.user_created', `User ${u.username} created (${u.role}, ${u.plant})`, { username: u.username, role: u.role, plant: u.plant });
-      console.log(`Created ${u.username} (${u.role}, plant ${u.plant}).`);
+      const u = await users.create({ username: a.username, displayName: a.name, role: a.role, plant: a.plant || 'all', department: a.department || null, password });
+      log('admin.user_created', `User ${u.username} created (${u.role}, ${u.plant}${u.department ? `, ${u.department}` : ''})`, { username: u.username, role: u.role, plant: u.plant, department: u.department });
+      console.log(`Created ${u.username} (${u.role}, plant ${u.plant}${u.department ? `, department ${u.department}` : ''}).`);
       if (!process.env.TA_PASSWORD) console.log(`One-time password: ${password}\nGive it to the user privately; they should change it after first sign-in.`);
     } else if (cmd === 'reset') {
       const row = users.byUsername(a.username);
@@ -49,7 +49,7 @@ async function main() {
     } else if (cmd === 'list') {
       console.table(users.list());
     } else {
-      console.log(`Usage: users.js <create|reset|disable|enable|list> [--username u] [--name "Full Name"] [--role ${ROLES.join('|')}] [--plant ${PLANTS.join('|')}]`);
+      console.log(`Usage: users.js <create|reset|disable|enable|list> [--username u] [--name "Full Name"] [--role ${ROLES.join('|')}] [--plant ${PLANTS.join('|')}] [--department ${DEPARTMENTS.join('|')}]`);
       process.exitCode = 1;
     }
   } catch (e) {

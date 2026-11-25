@@ -3,6 +3,7 @@
   'use strict';
   const { F, REG, RCA, fmt, util } = window.TA;
   const D = window.TD;
+  const M = window.TM; // measurement catalogue shared with the server (js/measure.js)
   const esc = util.esc;
   const $ = (s, r = document) => r.querySelector(s);
   const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
@@ -48,6 +49,7 @@
     reset: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>',
     flow: '<path d="M3 12h4l3-7 4 14 3-7h4"/>',
     logo: '<path d="M4 17c4-9 11-9 16-10M4 11c4-4 9-5 16-4M4 20h16"/>',
+    pen: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13 7l4 4"/>',
   };
   const ic = (n, cls) => `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"${cls ? ` class="${cls}"` : ''}>${I[n] || ''}</svg>`;
   const STAGE_IC = { fiber: 'fiber', spinning: 'spin', weaving: 'loom', knitting: 'loom', dyeing: 'drop', finishing: 'roll', cutting: 'cut', sewing: 'needle', packing: 'box', cash: 'cash' };
@@ -55,7 +57,7 @@
 
   // ---------------------------------------------------------------- navigation model
   const NAV = [
-    { g: 'Start', items: [['command', 'Command Center', 'home']] },
+    { g: 'Start', items: [['command', 'Command Center', 'home'], ['entry', 'Data Entry', 'pen']] },
     { g: 'Diagnose', items: [['rca', 'Root-Cause Explorer', 'tree'], ['audits', 'Audit Programs', 'clip']] },
     { g: 'Operations', items: [['ops', 'Production Floor', 'factory'], ['planning', 'Planning & Capacity', 'calendar']] },
     { g: 'Supply & Cash', items: [['supply', 'Inventory & Procurement', 'box'], ['finance', 'Finance & Cash', 'cash']] },
@@ -66,16 +68,27 @@
   NAV.forEach(g => g.items.forEach(([id, name, icon]) => { PAGE_META[id] = { name, icon, group: g.g }; }));
 
   const PERIODS = [
-    { id: 'm', name: 'This month (Nov 2026)', k: 1, per: 'per month' },
+    { id: 'm', name: 'Last 30 days', k: 1, per: 'per month' },
     { id: 'q', name: 'Last 3 months', k: 3, per: 'over 3 months' },
-    { id: 'y', name: 'Year to date', k: 11, per: 'year to date' },
+    { id: 'y', name: 'Last 12 months', k: 12, per: 'over 12 months' },
   ];
+  // Pages for accounts that enter records but do not read dashboards (department staff, data feeds).
+  const NAV_ENTRY_ONLY = [
+    { g: 'Start', items: [['entry', 'Data Entry', 'pen']] },
+    { g: 'Learn', items: [['lab', 'Formula Lab', 'calc'], ['glossary', 'Glossary', 'book']] },
+  ];
+  const PERIOD_WORD = { shift: 'Each shift', day: 'Daily', event: 'Each event', week: 'Weekly', month: 'Monthly' };
+  const REC_ST = { submitted: ['Waiting approval', 'warn'], approved: ['Approved', 'good'], rejected: ['Rejected', 'bad'], voided: ['Voided', ''] };
+  const EV_NAME = { measure: 'Measured', control: 'Control chart', trend: 'Trend', stratify: 'Stratified', pareto: 'Pareto', impact: 'Cost', formula: 'Formula' };
+  const ROLE_EXTRA = { operator: 'Department staff', admin: 'Administrator', integration: 'Data feed' };
+  const STREAM_KPI = { fiber: 'spinning|Contamination', spinning: 'spinning|Spinning waste', weaving: 'weaving|Loom efficiency', knitting: 'weaving|Knitting machine efficiency', dyeing: 'dyeing|Right-first-time dyeing', finishing: 'dyeing|Shrinkage after compacting', cutting: 'cutting|Marker efficiency', sewing: 'sewing|Line efficiency', packing: 'quality|Final AQL failure', cash: 'finance|Cash conversion cycle' };
+  const BENCH_KPI = { 'OEE': 'planning|OEE (plant)', 'Air-jet loom efficiency': 'weaving|Loom efficiency', 'Spinning waste (cotton)': 'spinning|Spinning waste', 'Right-first-time dyeing': 'dyeing|Right-first-time dyeing', 'Sewing line efficiency': 'sewing|Line efficiency', 'DHU (sewing)': 'sewing|Inline DHU', 'Marker efficiency': 'cutting|Marker efficiency', 'OTIF': 'planning|OTIF delivery', 'Cost of poor quality': 'quality|Cost of poor quality', 'Lab-dip approval cycle': 'dyeing|Lab-dip approval cycle', 'Water use (dyed fabric)': 'dyeing|Water use', 'Absenteeism': 'sewing|Absenteeism', 'LC discrepancies (1st presentation)': 'finance|LC discrepancy rate' };
   const STAGE_NAME = { detected: 'Detected', diagnosed: 'Diagnosed', approved: 'Approved', in_progress: 'In progress', verified: 'Verified' };
   const STAGE_DESC = { detected: 'AI flagged, needs a cause', diagnosed: 'Root cause found, awaiting approval', approved: 'Approved, ready to start', in_progress: 'Fix being implemented', verified: 'Result measured' };
   const ADV_LABEL = { detected: 'Mark diagnosed', diagnosed: 'Approve', approved: 'Start work', in_progress: 'Verify result' };
   const D8 = ['D1 Team formed', 'D2 Problem defined', 'D3 Containment in place', 'D4 Root cause verified', 'D5 Corrective action chosen', 'D6 Action implemented', 'D7 Recurrence prevented', 'D8 Closed & recognised'];
   const D8_BY_STAGE = { detected: 1, diagnosed: 4, approved: 5, in_progress: 6, verified: 8 };
-  const ST_WORD = { good: 'On target', warn: 'Near target', bad: 'Off target', unknown: 'No data' };
+  const ST_WORD = { good: 'On target', warn: 'Near target', bad: 'Off target', unknown: 'Not measured' };
 
   // ---------------------------------------------------------------- state: view prefs local, business data from the server
   const PREF_KEY = 'ta.prefs.v1';
@@ -90,9 +103,9 @@
     } catch (e) { /* ignore bad prefs */ }
     return p;
   }
-  const S = { ...loadPrefs(), role: 'ceo', user: null, actions: {}, log: [], lastScan: null };
+  const S = { ...loadPrefs(), role: 'ceo', user: null, actions: {}, log: [], m: null };
   const LIVE = {}; // 'section|kpi' -> { value, asOf, source } from the KPI feed
-  const ui = { gQ: '', gDom: 'All', gLetter: '', lQ: '', lDom: 'All', aFilter: 'all', lastPage: null, pIdx: 0, pItems: [], drawerFor: null, lastFocus: null, busy: false };
+  const ui = { gQ: '', gDom: 'All', gLetter: '', lQ: '', lDom: 'All', aFilter: 'all', lastPage: null, pIdx: 0, pItems: [], drawerFor: null, lastFocus: null, busy: false, recTab: 'mine', recs: {}, recOpen: null, lastForm: null };
   function save() { try { localStorage.setItem(PREF_KEY, JSON.stringify({ plant: S.plant, period: S.period })); } catch (e) { /* storage blocked: keep prefs in memory */ } }
   try { localStorage.removeItem('ta.state.v1'); } catch (e) { /* old client-side store is no longer trusted */ }
   const userCanApprove = () => !!S.user && APPROVER_ROLES.includes(S.user.role);
@@ -120,7 +133,7 @@
     (Array.isArray(list) ? list : []).forEach(k => {
       const s = D.SECTIONS[k.section];
       const row = s && s.kpis.find(x => x[0] === k.kpi);
-      if (row && Number.isFinite(k.value)) { row[1] = k.value; LIVE[`${k.section}|${k.kpi}`] = k; }
+      if (row && Number.isFinite(k.value)) LIVE[`${k.section}|${k.kpi}`] = k;
     });
   }
   function applyState(st) {
@@ -138,15 +151,50 @@
   // ---------------------------------------------------------------- derived data
   const per = () => PERIODS.find(p => p.id === S.period);
   const money = n => fmt.pkr(n * per().k);
-  const roleName = id => (D.ROLES.find(r => r.id === id) || {}).name || id;
+  const roleName = id => (D.ROLES.find(r => r.id === id) || {}).name || ROLE_EXTRA[id] || id;
   const plantShort = id => (D.PLANTS.find(p => p.id === id) || {}).short || id;
   const findingsFor = () => (S.plant === 'all' ? D.FINDINGS : D.FINDINGS.filter(f => f.plant === S.plant));
   const effPkr = f => f.pkr + (f.cash || 0) * D.FINANCING_RATE / 12;
   const scoreOf = f => RCA.score({ pkr: effPkr(f), customer: f.customer, effort: f.effort, risk: f.risk, confidence: f.conf });
   const ranked = list => list.map(f => ({ f, s: scoreOf(f) })).sort((a, b) => b.s - a.s).map(x => x.f);
-  const totals = list => list.reduce((t, f) => ({ leak: t.leak + f.pkr, rec: t.rec + f.pkr * f.rec, cash: t.cash + (f.cash || 0) }), { leak: 0, rec: 0, cash: 0 });
   const findingById = id => D.FINDINGS.find(f => f.id === id);
-  const kStatus = k => RCA.status(k[1], k[3], k[4]);
+
+  // ---------------------------------------------------------------- measured values: approved department records only, never demo numbers
+  const canRead = () => !!S.user && !!S.user.canReadDashboards;
+  const myForms = () => (S.user && Array.isArray(S.user.forms) ? S.user.forms : []);
+  const navFor = () => (canRead() ? NAV : NAV_ENTRY_ONLY).map(g => ({ ...g, items: g.items.filter(([id]) => id !== 'entry' || myForms().length) }));
+  const todayUtc = () => new Date().toISOString().slice(0, 10);
+  const todayLocal = () => { const d = new Date(); return new Date(d.getTime() - d.getTimezoneOffset() * 6e4).toISOString().slice(0, 10); };
+  const uOf = u => (u === '%' ? '%' : u ? ` ${u}` : '');
+  /** Coverage as shown: KPIs measured from approved records, plus any filled only by the live KPI feed (counted separately as `feed`). */
+  function cov() {
+    if (!S.m) return { measured: 0, applicable: 0, pct: 0, bySection: {}, records: 0, feed: 0 };
+    const c = S.m.coverage;
+    const bySection = {};
+    Object.entries(c.bySection).forEach(([k, v]) => { bySection[k] = { ...v }; });
+    let feed = 0;
+    Object.values(S.m.kpis).forEach(x => { if (x.applicable && x.value === null && LIVE[x.key] && bySection[x.sec]) { feed++; bySection[x.sec].measured++; } });
+    const measured = c.measured + feed;
+    return { ...c, bySection, measured, feed, pct: c.applicable ? Math.round(measured / c.applicable * 1000) / 10 : 0 };
+  }
+  const measuredFindings = () => (S.m ? S.m.findings : []);
+  /** One KPI as shown: measured from approved records, else the live KPI feed, else not measured (value null). */
+  function kv(sid, name) {
+    const key = `${sid}|${name}`;
+    const m = S.m && S.m.kpis[key];
+    const meta = M.META[key] || {};
+    const form = M.formForKpi(key);
+    const base = { key, sec: sid, name, unit: meta.unit, target: meta.target, dir: meta.dir, form: form ? form.id : null,
+      formLabel: m ? m.formLabel : form ? form.label : '', formula: m ? m.formula : M.KPIS[key] ? M.describe(M.KPIS[key]) : '' };
+    if (m && m.value !== null) return { ...base, ...m, source: 'measured' };
+    const live = LIVE[key];
+    if (live) return { ...base, value: live.value, status: RCA.status(live.value, meta.target, meta.dir), n: 0, first: null, last: String(live.asOf).slice(0, 10), stale: false, series: [], source: 'feed', feed: live };
+    return { ...base, value: null, status: 'unknown', n: 0, first: null, last: null, stale: false, series: [], source: null };
+  }
+  const kvKey = key => { const i = key.indexOf('|'); return kv(key.slice(0, i), key.slice(i + 1)); };
+  const kStatus = (sid, k) => kv(sid, k[0]).status;
+  const kpiRef = key => { const r = kvKey(key); const s = D.SECTIONS[r.sec]; const i = s ? s.kpis.findIndex(k => k[0] === r.name) : -1; return i < 0 ? '' : `${r.sec}:${i}`; };
+  const valTxt = r => (r.value === null ? 'Not measured' : `${fmtVal(r.value)}${uOf(r.unit)}`);
   const isEffective = (f, a) => a.after !== null && RCA.effective(a.after, f.kpi.target, f.kpi.dir);
   const sectionsForPlant = group => Object.entries(D.SECTIONS).filter(([, s]) => (!group || s.group === group) && (S.plant === 'all' || s.plants.includes(S.plant)));
   function secRoute(id) {
@@ -159,8 +207,8 @@
   }
   function healthScore() {
     const st = [];
-    sectionsForPlant().forEach(([, s]) => s.kpis.forEach(k => st.push(kStatus(k))));
-    return RCA.health(st);
+    sectionsForPlant().forEach(([sid, s]) => s.kpis.forEach(k => { const x = kStatus(sid, k); if (x !== 'unknown') st.push(x); }));
+    return st.length ? RCA.health(st) : null; // null: nothing measured, so no health score
   }
   const fmtVal = v => {
     if (!Number.isFinite(v)) return '—';
@@ -204,21 +252,49 @@
   const countNum = (n, d = 0, suf = '') => `<span class="num" data-count="${n}" data-f="num" data-d="${d}" data-s="${esc(suf)}">0${esc(suf)}</span>`;
 
   function kpiTile(k, i, secId, idx) {
-    const st = kStatus(k);
-    const [name, v, u, t, dir, bm] = k;
-    const prog = dir === 'up' ? Math.min(100, v / t * 100) : Math.min(100, v > 0 ? t / v * 100 : 100);
+    const [name, , u, t, dir, bm] = k;
+    const r = kv(secId, name);
+    const tu = u === '%' ? '%' : '';
+    if (r.value === null) {
+      return `<button class="card kpi lift rise nm" style="--i:${i}" data-kpi="${secId}:${idx}" aria-label="${esc(name)}: not measured, target ${esc(fmtVal(t))} ${esc(u)}. Needs ${esc(r.formLabel)}. Open details">
+      <span class="k-name">${esc(name)}${tag('Not measured')}</span>
+      <span class="k-val">—</span>
+      <span class="k-sub"><span>Target ${esc(fmtVal(t))}${tu}</span><span>No approved records</span></span>
+      <span class="meter"><i style="--w:0%"></i></span>
+      <span class="k-bm"><span class="need">Needs: ${esc(r.formLabel || 'a data source')}</span> · ${esc(bm)}</span></button>`;
+    }
+    const v = r.value, st = r.status;
+    const prog = dir === 'up' ? Math.min(100, t ? v / t * 100 : 100) : Math.min(100, v > 0 ? t / v * 100 : 100);
     const gap = dir === 'up' ? t - v : v - t;
     return `<button class="card kpi lift rise ${st}" style="--i:${i}" data-kpi="${secId}:${idx}" aria-label="${esc(name)}: ${esc(fmtVal(v))} ${esc(u)}, target ${esc(fmtVal(t))}. Open details">
       <span class="k-name">${esc(name)}${stTag(st)}</span>
       <span class="k-val">${withUnit(v, u)}</span>
-      <span class="k-sub"><span>Target ${esc(fmtVal(t))}${u === '%' ? '%' : ''}</span><span>${st === 'good' ? 'On target' : `Gap ${esc(fmtVal(Math.abs(gap)))}`}</span></span>
-      <span class="meter ${st}"><i style="--w:${prog.toFixed(1)}%"></i></span>
-      <span class="k-bm">${liveNote(secId, name)}${esc(bm)}</span></button>`;
+      <span class="k-sub"><span>Target ${esc(fmtVal(t))}${tu}</span><span>${st === 'good' ? 'On target' : `Gap ${esc(fmtVal(Math.abs(gap)))}`}</span></span>
+      <span class="meter ${st}"><i style="--w:${Math.max(0, prog).toFixed(1)}%"></i></span>
+      <span class="k-bm">${srcNote(r)}${esc(bm)}</span></button>`;
   }
-  function liveNote(secId, name) {
-    const live = LIVE[`${secId}|${name}`];
-    return live ? `<span class="live">● Live from ${esc(live.source)} · ${esc(new Date(live.asOf).toLocaleDateString())}</span>` : '<span class="demo">Demo value · </span>';
+  function srcNote(r) {
+    if (r.source === 'feed') return `<span class="live">● Live feed from ${esc(r.feed.source)} · ${esc(r.last)}</span> · `;
+    return `<span class="live">● Measured from ${r.n} approved record${r.n === 1 ? '' : 's'}${r.last ? ` · last ${esc(r.last)}` : ''}</span>${r.stale ? ' <span class="stale">· no new records lately</span>' : ''} · `;
   }
+  const evList = list => `<ul class="evid">${list.map(e => `<li class="${e.signal || e.worsening ? 'sig' : ''}"><b>${esc(EV_NAME[e.kind] || e.kind)}:</b> ${esc(e.text)}</li>`).join('')}</ul>`;
+  /** A KPI that misses its target according to approved records, with its statistical evidence. */
+  function mFindingCard(f, i) {
+    const u = uOf(f.unit);
+    const ev = f.evidence.filter(e => e.kind !== 'measure' && e.kind !== 'impact').slice(0, 3);
+    return `<article class="card fd rise" style="--i:${i}">
+      <div class="fd-top"><div>
+        <div class="chips" style="margin-bottom:6px">${tag(esc(D.SECTIONS[f.sec].name))}${stTag(f.status)}${tag('Measured', 'good')}</div>
+        <h4>${esc(f.name)} is ${esc(fmtVal(f.value))}${esc(u)} against a target of ${esc(fmtVal(f.target))}${esc(u)}</h4>
+        <div class="where">${esc(f.evidence[0].text)}</div></div>
+        <div class="money">${f.impactPkr ? `<b>${fmt.pkr(f.impactPkr)}</b><span>per 30 days</span>` : `<b>${esc(fmtVal(f.gapPct))}%</b><span>off target</span>`}</div></div>
+      ${ev.length ? evList(ev) : ''}
+      <div class="fd-foot"><span class="score">From <b>${f.n}</b> approved record${f.n === 1 ? '' : 's'}</span><span class="sp"></span>
+        ${f.hypotheses.length && S.actions[f.hypotheses[0].id] ? `<button class="btn sm" data-open="${esc(f.hypotheses[0].id)}">${ic('tree')} Likely cause</button>` : ''}
+        <button class="btn sm primary" data-kpi="${kpiRef(f.key)}">Evidence ${ic('arrow')}</button></div>
+    </article>`;
+  }
+  const seriesChart = (r, title) => chart({ type: 'trend', title: title || `${r.name} · measured`, values: r.series.map(p => p[1]), labels: r.series.map(p => p[0].slice(5)), target: r.target, dir: r.dir, unit: r.unit === '%' ? '%' : '' });
 
   function findingCard(f, i) {
     const a = S.actions[f.id];
@@ -266,7 +342,10 @@
     const id = `lg${++gid}`;
     const last = c.values[c.values.length - 1];
     const st = RCA.status(last, c.target, c.dir);
-    const months = D.MONTHS.map((m, i) => (i % 2 === 1 ? `<text x="${x(i).toFixed(1)}" y="${H - 4}" text-anchor="middle">${m}</text>` : '')).join('');
+    const every = Math.max(1, Math.ceil(c.values.length / 5));
+    const months = c.labels
+      ? c.labels.map((m, i) => (i % every === 0 || i === c.values.length - 1 ? `<text x="${x(i).toFixed(1)}" y="${H - 4}" text-anchor="middle">${esc(m)}</text>` : '')).join('')
+      : D.MONTHS.map((m, i) => (i % 2 === 1 ? `<text x="${x(i).toFixed(1)}" y="${H - 4}" text-anchor="middle">${m}</text>` : '')).join('');
     const ticks = [hi - pad, (hi + lo) / 2, lo + pad].map(v => `<text x="${L - 6}" y="${(y(v) + 3).toFixed(1)}" text-anchor="end">${esc(fmtVal(Math.round(v * 10) / 10))}</text>`).join('');
     return `<div class="trend"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(c.title)}. Latest ${esc(fmtVal(last))}${esc(c.unit || '')}, target ${esc(fmtVal(c.target))}${esc(c.unit || '')}.">
       <defs><linearGradient id="${id}" x1="0" x2="1"><stop offset="0" stop-color="#8b9bff"/><stop offset="1" stop-color="#2dd4bf"/></linearGradient>
@@ -299,6 +378,10 @@
   }
   function ring(v, label) {
     const r = 54, C = 2 * Math.PI * r;
+    if (v === null || !Number.isFinite(v)) {
+      return `<div class="ring" role="img" aria-label="${esc(label)}: not measured"><svg viewBox="0 0 132 132"><circle class="trk" cx="66" cy="66" r="${r}" fill="none" stroke-width="11"/></svg>
+      <div class="lbl"><div><b>—</b><span>${esc(label)}</span></div></div></div>`;
+    }
     const col = v >= 70 ? 'var(--good)' : v >= 45 ? 'var(--warn)' : 'var(--bad)';
     return `<div class="ring" role="img" aria-label="${esc(label)} ${v} out of 100"><svg viewBox="0 0 132 132"><circle class="trk" cx="66" cy="66" r="${r}" fill="none" stroke-width="11"/>
       <circle class="val" cx="66" cy="66" r="${r}" fill="none" stroke="${col}" stroke-width="11" stroke-dasharray="${C.toFixed(1)}" stroke-dashoffset="${C.toFixed(1)}" data-off="${(C * (1 - v / 100)).toFixed(1)}"/></svg>
@@ -306,81 +389,96 @@
   }
 
   // ---------------------------------------------------------------- page: Command Center
+  function statVal(r) {
+    return r.value === null ? '<span class="k-val nm">Not measured</span>' : `<span class="k-val">${withUnit(r.value, r.unit)}</span>`;
+  }
   function pageCommand() {
     const list = findingsFor();
-    const t = totals(list);
-    const top = ranked(list);
+    const c = cov();
+    const mf = measuredFindings();
     const health = healthScore();
-    const acts = list.map(f => S.actions[f.id]);
-    const waitingApproval = list.filter(f => S.actions[f.id].stage === 'diagnosed');
-    const execution = list.filter(f => ['approved', 'in_progress'].includes(S.actions[f.id].stage));
+    const acts = list.map(f => S.actions[f.id]).filter(Boolean);
+    const waitingApproval = list.filter(f => (S.actions[f.id] || {}).stage === 'diagnosed');
     const canApprove = userCanApprove();
-    const constraint = D.STREAM.find(s => s.constraint);
-    const role = D.ROLES.find(r => r.id === S.role);
-    const heroLine = {
-      ceo: `<em>${money(t.leak)}</em> is leaking ${per().per}, and <em>${fmt.pkr(t.cash)}</em> of cash is locked up. One stage limits the whole group: the <em>dye house</em>.`,
-      plant: `The dye house is loaded to <em>${constraint.load}%</em> of capacity. Every hour lost there costs <em>${fmt.pkr(D.CONSTRAINT_COST_PER_HOUR)}</em> for the whole plant. Fix the constraint first.`,
-      dept: `<em>${execution.length} actions</em> are approved and waiting for your team, worth <em>${money(execution.reduce((s, f) => s + f.pkr, 0))}</em> ${per().per}.`,
-      finance: `Cost of poor quality is <em>9.8% of sales</em>, the cash cycle is <em>118 days</em>, and <em>${fmt.pkr(t.cash)}</em> of cash can be released.`,
-    }[S.role];
+    const role = D.ROLES.find(r => r.id === S.role) || D.ROLES[0];
+    const where = S.plant === 'all' ? 'the group' : plantShort(S.plant);
+    const gapCost = mf.reduce((s, f) => s + (f.impactPkr || 0), 0);
+    const load = kvKey('dyeing|Dye-house load');
+    const constraint = load.value !== null && load.value > 90;
+    const oee = kvKey('planning|OEE (plant)'), otif = kvKey('planning|OTIF delivery');
     const byStage = RCA.STAGES.map(st => acts.filter(a => a.stage === st).length);
+    const pending = S.user.pendingReviews || 0;
+    const heroLine = !c.measured
+      ? `Nothing in ${esc(where)} is measured yet. <em>Every number here will come from your departments' approved records.</em>`
+      : `<em>${esc(fmtVal(c.pct))}% of KPIs</em> are measured from ${c.records} approved record${c.records === 1 ? '' : 's'}${c.feed ? ` and ${c.feed} live-feed value${c.feed === 1 ? '' : 's'}` : ''}. <em>${mf.length}</em> miss their target${gapCost ? `, costing <em>${fmt.pkr(gapCost)}</em> per 30 days` : ''}.`;
 
     const stream = D.STREAM.map((s, i) => {
+      const r = kvKey(STREAM_KPI[s.id]);
+      const isC = s.id === 'dyeing' && constraint;
+      const nextC = i < D.STREAM.length - 1 && D.STREAM[i + 1].id === 'dyeing' && constraint;
       const dim = S.plant !== 'all' && s.plant !== S.plant;
-      const link = i < D.STREAM.length - 1 ? `<span class="st-link ${D.STREAM[i + 1].constraint || s.constraint ? 'slow' : ''}" aria-hidden="true"></span>` : '';
-      return `<button class="st-node ${s.st} ${s.constraint ? 'constraint' : ''} ${dim ? 'dim' : ''}" data-go="${secRoute(s.section)}" aria-label="${esc(s.name)}: ${esc(s.kpi)}${s.load ? `, load ${s.load}%` : ''}${s.constraint ? ', constraint' : ''}">
-        ${s.constraint ? '<span class="flag">CONSTRAINT</span>' : ''}
-        <span class="ic">${ic(STAGE_IC[s.id])}</span><b>${esc(s.name)}</b><span class="k">${esc(s.kpi)}</span>
-        ${s.load ? `<span class="ld"><span>Load</span><span>${s.load}%</span></span><span class="meter ${s.load > 100 ? 'bad' : s.load > 88 ? 'warn' : 'good'}"><i style="--w:${Math.min(100, s.load)}%"></i></span>` : `<span class="ld"><span>Cash cycle</span><span>118 d</span></span><span class="meter bad"><i style="--w:100%"></i></span>`}
+      const link = i < D.STREAM.length - 1 ? `<span class="st-link ${isC || nextC ? 'slow' : ''}" aria-hidden="true"></span>` : '';
+      const meter = s.id === 'dyeing' && load.value !== null
+        ? `<span class="ld"><span>Load</span><span>${esc(fmtVal(load.value))}%</span></span><span class="meter ${load.value > 100 ? 'bad' : load.value > 88 ? 'warn' : 'good'}"><i style="--w:${Math.min(100, load.value)}%"></i></span>`
+        : `<span class="meter ${r.value === null ? '' : r.status}"><i style="--w:${r.value === null ? 0 : 100}%"></i></span>`;
+      return `<button class="st-node ${r.value === null ? 'nm' : r.status} ${isC ? 'constraint' : ''} ${dim ? 'dim' : ''}" data-go="${secRoute(s.section)}" aria-label="${esc(s.name)}: ${esc(r.name)} ${esc(valTxt(r))}${isC ? ', constraint' : ''}">
+        ${isC ? '<span class="flag">CONSTRAINT</span>' : ''}
+        <span class="ic">${ic(STAGE_IC[s.id])}</span><b>${esc(s.name)}</b><span class="k">${esc(r.name)}</span>
+        <span class="ld"><span>${r.value === null ? 'Not measured' : 'Measured'}</span><span>${r.value === null ? '—' : esc(fmtVal(r.value)) + esc(uOf(r.unit))}</span></span>
+        ${meter}
       </button>${link}`;
     }).join('');
+    const canDyeForm = myForms().includes('dyehouse_day');
+    const callout = constraint
+      ? `<b>Dyeing is the constraint: load measured at ${esc(fmtVal(load.value))}% from ${load.n} approved records.</b> The plant can only ship what the dye house finishes. Raising output anywhere else only builds more WIP.`
+      : load.value !== null
+        ? `<b>Dye-house load is ${esc(fmtVal(load.value))}%</b>, below the 90% constraint line. Check Planning's bottleneck load to find the stage that limits output.`
+        : '<b>Constraint not measured.</b> Enter Dye-house capacity (daily) records to see whether dyeing limits what the plant can ship.';
 
     const bySec = {};
-    list.forEach(f => { bySec[f.sec] = (bySec[f.sec] || 0) + f.pkr; });
-    const secItems = Object.entries(bySec).sort((a, b) => b[1] - a[1]).map(([k, v]) => [D.SECTIONS[k].name, Math.round(v / 1e5) / 10 * per().k]);
-    const by6m = {};
-    list.forEach(f => { by6m[f.m6] = (by6m[f.m6] || 0) + f.pkr; });
+    mf.forEach(f => { if (f.impactPkr) bySec[f.sec] = (bySec[f.sec] || 0) + f.impactPkr; });
+    const secItems = Object.entries(bySec).map(([k, v]) => [D.SECTIONS[k].name, Math.round(v / 1e4) / 100]);
+    const bench = [['Right-first-time dyeing', 'dyeing|Right-first-time dyeing', '95–98%', '65–80%'], ['Sewing line efficiency', 'sewing|Line efficiency', '70–80%', '45–60%'], ['OEE', 'planning|OEE (plant)', '85%', '55–70%']];
 
     return `
     <section class="card hero rise glass" style="--i:0">
       <div>
         <div class="eyebrow"><span class="pulse"></span>Signed in as ${esc(S.user.displayName)} · ${esc(roleName(S.user.role))}${S.user.plant !== 'all' ? ' · ' + esc(plantShort(S.user.plant)) : ''}</div>
         <h2>${heroLine}</h2>
-        <p>${esc(role.focus)} The scan found <b>${list.length} finding${list.length === 1 ? '' : 's'}</b> across ${esc(S.plant === 'all' ? 'the group' : plantShort(S.plant))}. They are ranked by money, customer impact, effort, risk and confidence, and each has a root cause, an owner and a fix.</p>
+        <p>${esc(role.focus)} Department staff enter shift, daily and month-end records, and a different person approves each one. Only approved records count. A KPI with no records shows <b>Not measured</b>, never an estimate.</p>
         <div class="cta">
-          ${top[0] ? `<button class="btn primary" data-open="${top[0].id}">${ic('bolt')} Start with #1: ${esc(top[0].title.length > 52 ? top[0].title.slice(0, 50) + '…' : top[0].title)}</button>` : ''}
-          <button class="btn" data-go="#/rca/otif">${ic('tree')} Trace why orders are late</button>
-          ${canApprove && waitingApproval.length ? `<button class="btn" data-go="#/actions/approve">${ic('check')} ${waitingApproval.length} waiting for your approval</button>` : ''}
-          ${S.role === 'dept' ? `<button class="btn" data-go="#/actions/progress">${ic('check')} Open my work queue</button>` : ''}
+          ${myForms().length ? `<button class="btn primary" data-go="#/entry">${ic('pen')} Enter data</button>` : ''}
+          ${pending ? `<button class="btn" data-go="#/entry/queue">${ic('check')} ${pending} record${pending === 1 ? '' : 's'} waiting for your approval</button>` : ''}
+          ${mf[0] ? `<button class="btn" data-kpi="${kpiRef(mf[0].key)}">${ic('bolt')} Biggest measured gap: ${esc(mf[0].name)}</button>` : ''}
+          ${canApprove && waitingApproval.length ? `<button class="btn" data-go="#/actions/approve">${ic('check')} ${waitingApproval.length} action${waitingApproval.length === 1 ? '' : 's'} to approve</button>` : ''}
         </div>
       </div>
-      ${ring(health, 'Plant health')}
+      <div class="rings">${ring(Math.round(c.pct), 'Measured')}${ring(health, 'Health')}</div>
     </section>
 
     <div class="grid g6 mt">
-      <div class="card stat rise bad" style="--i:1"><span class="big-ic">${ic('alert')}</span><span class="k-name">Margin leakage</span><span class="k-val">${countPkr(t.leak * per().k)}</span><span class="k-sub">${per().per}</span></div>
-      <div class="card stat rise good" style="--i:2"><span class="big-ic">${ic('spark')}</span><span class="k-name">Recoverable</span><span class="k-val">${countPkr(t.rec * per().k)}</span><span class="k-sub">${t.leak ? Math.round(t.rec / t.leak * 100) : 0}% of leakage</span></div>
-      <div class="card stat rise" style="--i:3"><span class="big-ic">${ic('cash')}</span><span class="k-name">Cash to release</span><span class="k-val">${countPkr(t.cash)}</span><span class="k-sub">refunds, stock, receivables</span></div>
-      <div class="card stat rise" style="--i:4"><span class="big-ic">${ic('factory')}</span><span class="k-name">OEE (plant)</span><span class="k-val">${countNum(61, 0, '%')}</span><span class="k-sub">target 75% · world-class 85%</span></div>
-      <div class="card stat rise" style="--i:5"><span class="big-ic">${ic('truck')}</span><span class="k-name">OTIF delivery</span><span class="k-val">${countNum(78, 0, '%')}</span><span class="k-sub">target 92%</span></div>
+      <div class="card stat rise" style="--i:1"><span class="big-ic">${ic('db')}</span><span class="k-name">KPIs measured</span><span class="k-val">${countNum(c.measured)}<small>/ ${c.applicable}</small></span><span class="k-sub">${c.records} approved records</span></div>
+      <div class="card stat rise ${mf.length ? 'bad' : ''}" style="--i:2"><span class="big-ic">${ic('alert')}</span><span class="k-name">Measured off target</span><span class="k-val">${countNum(mf.length)}</span><span class="k-sub">${mf.filter(f => f.status === 'bad').length} far off</span></div>
+      <div class="card stat rise" style="--i:3"><span class="big-ic">${ic('cash')}</span><span class="k-name">Measured cost of gaps</span>${gapCost ? `<span class="k-val">${countPkr(gapCost)}</span><span class="k-sub">per 30 days, at finance cost rates</span>` : '<span class="k-val nm">Not measured</span><span class="k-sub">needs cost rates from finance</span>'}</div>
+      <div class="card stat rise ${oee.value === null ? '' : oee.status}" style="--i:4"><span class="big-ic">${ic('factory')}</span><span class="k-name">OEE (plant)</span>${statVal(oee)}<span class="k-sub">target ${esc(fmtVal(oee.target))}% · world-class 85%</span></div>
+      <div class="card stat rise ${otif.value === null ? '' : otif.status}" style="--i:5"><span class="big-ic">${ic('truck')}</span><span class="k-name">OTIF delivery</span>${statVal(otif)}<span class="k-sub">target ${esc(fmtVal(otif.target))}%</span></div>
       <div class="card stat rise" style="--i:6"><span class="big-ic">${ic('check')}</span><span class="k-name">Fixes verified</span><span class="k-val">${countNum(byStage[4])}<small>/ ${list.length}</small></span><span class="k-sub">${byStage[3]} in progress</span></div>
     </div>
 
     <div class="card mt rise" style="--i:7">
-      <h3>${ic('flow')}Value stream: fiber to cash <span class="sub">Click any stage to drill down</span></h3>
+      <h3>${ic('flow')}Value stream: fiber to cash <span class="sub">Measured headline KPI per stage · click to drill down</span></h3>
       <div class="stream">${stream}</div>
-      <div class="callout">${ic('alert')}<div><b>Dyeing is the constraint (${constraint.load}% load).</b> The plant can only ship what the dye house finishes. Re-dyes, jet breakdowns and long colour changeovers take ${'151'} hours a month from this stage. Raising output anywhere else only builds more WIP.</div><button class="btn sm" data-go="#/rca/otif">See the causal chain ${ic('arrow')}</button></div>
+      <div class="callout">${ic(constraint ? 'alert' : 'info')}<div>${callout}</div>${!constraint && load.value === null && canDyeForm ? `<button class="btn sm" data-go="#/entry/dyehouse_day">${ic('pen')} Enter dye-house capacity</button>` : `<button class="btn sm" data-go="#/rca/otif">See the causal chain ${ic('arrow')}</button>`}</div>
     </div>
 
     <div class="grid g-wide mt">
-      <div class="card rise" style="--i:8"><h3>${ic('bolt')}Do these next <span class="sub">Ranked by priority score</span></h3>
-        <div class="rows">${top.slice(0, 6).map((f, i) => `<button class="next" data-open="${f.id}"><span class="rk">${i + 1}</span><span><span class="t">${esc(f.title)}</span><span class="s">${esc(f.who)} · ${esc(plantShort(f.plant))} · ${STAGE_NAME[S.actions[f.id].stage]}</span></span><span class="r"><b>${f.cash ? fmt.pkr(f.cash) : money(f.pkr)}</b><span>${f.cash ? 'cash' : per().per} · score ${scoreOf(f)}</span></span></button>`).join('')}</div>
+      <div class="card rise" style="--i:8"><h3>${ic('bolt')}Do these next <span class="sub">Measured gaps, biggest cost first</span></h3>
+        ${mf.length ? `<div class="rows">${mf.slice(0, 6).map((f, i) => `<button class="next" data-kpi="${kpiRef(f.key)}"><span class="rk">${i + 1}</span><span><span class="t">${esc(f.name)}: ${esc(fmtVal(f.value))}${esc(uOf(f.unit))} vs target ${esc(fmtVal(f.target))}${esc(uOf(f.unit))}</span><span class="s">${esc(D.SECTIONS[f.sec].name)} · ${f.n} approved records · ${esc(ST_WORD[f.status])}</span></span><span class="r"><b>${f.impactPkr ? fmt.pkr(f.impactPkr) : esc(fmtVal(f.gapPct)) + '%'}</b><span>${f.impactPkr ? 'per 30 days' : 'gap'}</span></span></button>`).join('')}</div>`
+          : `<div class="empty">${c.measured ? 'Every measured KPI is on target.' : 'No measured findings yet. They appear as soon as approved records show a KPI missing its target.'}</div>`}
         <div class="mt"><button class="btn sm" data-go="#/actions">Open Action Center ${ic('arrow')}</button></div>
       </div>
-      <div class="card rise" style="--i:9"><h3>${ic('target')}Where the money leaks <span class="sub">PKR M ${esc(per().per)}</span></h3>
-        ${chartPareto({ items: secItems })}
-        <div class="sec-t" style="margin:16px 0 8px">By root-cause type (6M)</div>
-        <div class="chips">${Object.entries(by6m).sort((a, b) => b[1] - a[1]).map(([k, v]) => tag(`${esc(k)} · ${money(v)}`, 'acc')).join('')}</div>
+      <div class="card rise" style="--i:9"><h3>${ic('target')}Where measured money leaks <span class="sub">PKR M per 30 days</span></h3>
+        ${secItems.length ? chartPareto({ items: secItems }) : '<div class="empty">No measured PKR impact yet. It needs approved records for an off-target KPI plus finance\'s cost rates.</div>'}
       </div>
     </div>
 
@@ -389,13 +487,13 @@
     </div>
 
     <div class="grid g3 mt">
-      ${[['Right-first-time dyeing', '76%', '95–98%', '65–80%'], ['Sewing line efficiency', '52%', '70–80%', '45–60%'], ['OEE', '61%', '85%', '55–70%']].map((b, i) => `
+      ${bench.map((b, i) => { const r = kvKey(b[1]); return `
       <div class="card lift rise" style="--i:${11 + i}"><h3>${ic('target')}${esc(b[0])}</h3>
-        <div class="k-val">${esc(b[1])}<small>ours</small></div>
+        <div class="k-val">${r.value === null ? '<span class="nm">Not measured</span>' : `${esc(fmtVal(r.value))}<small>% ours</small>`}</div>
         <div class="k-sub mt"><span>World-class <b>${esc(b[2])}</b></span><span>Typical South Asia <b>${esc(b[3])}</b></span></div>
-        <div class="mt"><button class="btn sm ghost" data-go="#/bench">All benchmarks ${ic('arrow')}</button></div></div>`).join('')}
+        <div class="mt"><button class="btn sm ghost" data-go="#/bench">All benchmarks ${ic('arrow')}</button></div></div>`; }).join('')}
     </div>
-    <p class="note-foot">All plant figures are dummy data for the prototype. Benchmarks and "proven fix" results come from public research and are labelled by confidence on the Benchmarks page.</p>`;
+    <p class="note-foot">Every value on this page is calculated from approved department records for ${esc(where)} over the ${esc(per().name.toLowerCase())}. "Not measured" means there is no approved record yet. Audit-playbook findings in the Action Center are baseline estimates until their KPI is measured.</p>`;
   }
 
   // ---------------------------------------------------------------- page: Root-Cause Explorer
@@ -493,7 +591,7 @@
       const kpis = a.kpi.map((k, i) => `<div class="card kpi rise ${k[3]}" style="--i:${i}"><span class="k-name">${esc(k[0])}${stTag(k[3])}</span><span class="k-val">${esc(k[1])}</span><span class="k-bm">${esc(k[2])}</span></div>`).join('');
       const charts = a.ch.map(c => { const m = Math.max(...c.b.map(x => x[1])); return `<div class="card rise"><h3>${ic('target')}${esc(c.t)}</h3><div class="rows">${c.b.map((x, i) => `<div class="row"><span>${esc(x[0])}</span><div class="bar"><i class="${c.r.includes(i) ? 'r' : ''}" style="--w:${(x[1] / m * 100).toFixed(1)}%;--i:${i}"></i></div><em>${esc(fmtVal(x[1]))}</em></div>`).join('')}</div></div>`; }).join('');
       const tb = `<div class="card tw rise"><table><thead><tr>${a.tb.h.map(h => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${a.tb.r.map(r => `<tr><td>${esc(r[0])}</td><td>${esc(r[1])}</td><td>${esc(r[2])}</td><td><span class="pill ${r[3]}">${{ h: 'High', m: 'Medium', l: 'Low' }[r[3]]}</span></td></tr>`).join('')}</tbody></table></div>`;
-      body = `<div class="grid g-auto">${kpis}</div><div class="grid g2 mt">${charts}</div>${secT('Top findings')}${tb}<p class="note-foot">Red bars and cards mark values outside target. Dummy data for the prototype.</p>`;
+      body = `<div class="grid g-auto">${kpis}</div><div class="grid g2 mt">${charts}</div>${secT('Top findings')}${tb}<p class="note-foot">Red bars and cards mark values outside target. This is an illustrative example of the audit method, not your measured data; measured values are on the area pages.</p>`;
     }
     return `${pageHead('Audit Programs', esc(a.lead), seg)}<div class="tabs">${tabs}</div>${body}`;
   }
@@ -501,23 +599,37 @@
   // ---------------------------------------------------------------- section pages
   function renderSection(id, i0 = 0) {
     const s = D.SECTIONS[id];
-    const bad = s.kpis.filter(k => kStatus(k) === 'bad').length;
+    const rs = s.kpis.map(k => kv(id, k[0]));
+    const measured = rs.filter(r => r.value !== null);
+    const bad = measured.filter(r => r.status === 'bad').length;
     const fs = ranked(findingsFor().filter(f => f.sec === id));
+    const mf = measuredFindings().filter(f => f.sec === id);
     const kp = s.kpis.map((k, i) => kpiTile(k, i + i0, id, i)).join('');
-    const tbl = `<div class="card tw rise"><h3>${ic('factory')}${esc(s.table.title)}</h3><table><thead><tr><th></th>${s.table.h.map(h => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${s.table.rows.map((r, i) => `<tr><td><span class="dot ${s.table.st[i]}" title="${ST_WORD[s.table.st[i]]}"></span></td>${r.map(c => `<td>${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+    const trends = measured.filter(r => r.series && r.series.length >= 2).sort((a, b) => (a.status === 'bad' ? 0 : 1) - (b.status === 'bad' ? 0 : 1)).slice(0, 4);
+    const mk = S.m ? Object.values(S.m.kpis) : [];
+    const srcRows = Object.values(M.FORMS).filter(f => f.depts.includes(id)).map(f => {
+      const ks = mk.filter(x => x.form === f.id);
+      const n = ks.reduce((m, x) => Math.max(m, x.n), 0);
+      const last = ks.map(x => x.last).filter(Boolean).sort().pop();
+      return `<tr><td><span class="dot ${n ? 'good' : ''}" title="${n ? 'Has approved records' : 'No approved records'}"></span></td><td><b>${esc(f.label)}</b></td><td>${esc(PERIOD_WORD[f.period])}</td><td>${(n2 => (n2 ? `${n2} KPI${n2 === 1 ? '' : 's'}` : 'Cause analysis (Pareto)'))(Object.values(M.KPIS).filter(k => k.form === f.id).length)}</td><td>${n ? `${n} records used` : 'No approved records'}</td><td>${last ? esc(last) : '—'}</td><td>${myForms().includes(f.id) ? `<a class="btn sm" href="#/entry/${f.id}">${ic('pen')} Enter</a>` : ''}</td></tr>`;
+    }).join('');
     return `${pageHead(esc(s.name), esc(s.intro), s.plants.map(p => tag(esc(plantShort(p)))).join(''))}
-      ${hint(`<b>${bad} of ${s.kpis.length} KPIs are off target.</b> Start with the red tiles; click any tile to see its formula, benchmark and the findings behind it. The findings below give the cause, the money, the owner and the fix, ranked by priority.`)}
+      ${hint(`<b>${measured.length} of ${s.kpis.length} KPIs are measured</b> from approved records${measured.length ? `, and ${bad} ${bad === 1 ? 'is' : 'are'} off target` : ''}. Tiles marked "Not measured" have no approved record yet. Click any tile for its formula, the records behind it and the form that feeds it.`)}
       <div class="grid g-auto">${kp}</div>
-      <div class="grid g2 mt">${s.charts.map(chart).join('')}</div>
-      ${secT(`AI findings · ${fs.length}`)}
-      ${fs.length ? `<div class="grid g2">${fs.map((f, i) => findingCard(f, i)).join('')}</div>` : `<div class="card empty">No findings for ${esc(plantShort(S.plant))} in this area. Switch the plant filter to "Whole group" to see all.</div>`}
-      ${secT('Detail')}${tbl}
+      ${secT('Measured trends')}
+      ${trends.length ? `<div class="grid g2">${trends.map(r => seriesChart(r)).join('')}</div>` : '<div class="card empty">No measured trend yet. Once approved records cover two or more dates, each KPI gets a run chart against its target here.</div>'}
+      ${secT(`Measured findings · ${mf.length}`)}
+      ${mf.length ? `<div class="grid g2">${mf.map((f, i) => mFindingCard(f, i)).join('')}</div>` : `<div class="card empty">${measured.length ? 'Every measured KPI in this area is on target.' : 'Nothing is measured in this area yet, so there are no measured findings.'}</div>`}
+      ${secT(`Audit playbook · ${fs.length} baseline estimates, not measured`)}
+      ${fs.length ? `<div class="grid g2">${fs.map((f, i) => findingCard(f, i)).join('')}</div>` : `<div class="card empty">No playbook findings for ${esc(plantShort(S.plant))} in this area. Switch the plant filter to "Whole group" to see all.</div>`}
+      ${secT('Data sources for this area')}
+      <div class="card tw rise"><table><thead><tr><th></th><th>Form</th><th>How often</th><th>Feeds</th><th>Records</th><th>Latest</th><th></th></tr></thead><tbody>${srcRows}</tbody></table></div>
       ${secT('Key terms used here')}
       <div class="chips">${s.terms.map(t => `<button class="chip" data-term="${esc(t)}">${esc(t)}</button>`).join('')}</div>`;
   }
   function worstStatus(id) {
-    const st = D.SECTIONS[id].kpis.map(kStatus);
-    return st.includes('bad') ? 'bad' : st.includes('warn') ? 'warn' : 'good';
+    const st = D.SECTIONS[id].kpis.map(k => kStatus(id, k));
+    return st.includes('bad') ? 'bad' : st.includes('warn') ? 'warn' : st.includes('good') ? 'good' : 'unknown';
   }
   function tabsFor(ids, active, base) {
     return `<div class="tabs" role="tablist">${ids.map(id => `<a class="tab ${id === active ? 'on' : ''}" role="tab" aria-selected="${id === active}" href="${base}${id}">${ic(SEC_IC[D.SECTIONS[id].icon] || 'factory')}${esc(D.SECTIONS[id].name)}<span class="dot ${worstStatus(id)}"></span></a>`).join('')}</div>`;
@@ -655,6 +767,187 @@
     toast('Exported textile-audit-actions.csv');
   }
 
+  // ---------------------------------------------------------------- page: Data Entry (maker-checker records)
+  const recTag = st => tag(...(REC_ST[st] || [st, '']));
+  function entryForm(form) {
+    const plants = S.user.plant === 'all' ? M.PLANT_IDS : [S.user.plant];
+    const defPlant = plants.includes(S.plant) ? S.plant : plants[0];
+    const fields = [...form.fields.filter(f => f.dim), ...form.fields.filter(f => !f.dim)];
+    const err = id => `<small class="ferr" id="${id}-err" hidden></small>`;
+    const fld = f => {
+      const id = `ef-${f.k}`;
+      const lab = `${esc(f.label)}${f.unit && f.unit !== 'count' ? ` <small>(${esc(f.unit)})</small>` : ''}${f.req ? ' <span class="req" aria-hidden="true">*</span>' : ''}`;
+      const at = `id="${id}" data-k="${f.k}" aria-describedby="${id}-err"${f.req ? ' required aria-required="true"' : ''}`;
+      let ctl;
+      if (f.kind === 'choice') ctl = `<select ${at}><option value="">Choose…</option>${f.options.map(o => `<option>${esc(o)}</option>`).join('')}</select>`;
+      else if (f.kind === 'yesno') ctl = `<select ${at}><option value="">—</option><option value="1">Yes</option><option value="0">No</option></select>`;
+      else if (f.kind === 'text') ctl = `<input type="text" ${at} maxlength="40" autocomplete="off" spellcheck="false">`;
+      else ctl = `<input type="number" ${at} inputmode="decimal" step="${f.kind === 'int' ? 1 : 'any'}" min="${f.min}" max="${f.max}">`;
+      return `<div class="ef-f"><label class="f" for="${id}">${lab}</label>${ctl}${f.help ? `<small class="help">${esc(f.help)}</small>` : ''}${err(id)}</div>`;
+    };
+    const dateLabel = form.period === 'month' ? 'Month (any day in it)' : form.period === 'week' ? 'Week (any day in it)' : 'Date';
+    const once = form.key ? `one record per ${form.period === 'month' ? 'month' : form.period === 'week' ? 'week' : 'date'}${form.key.length ? ` and ${form.key.map(k => form.fields.find(x => x.k === k).label.toLowerCase()).join(' + ')}` : ''}` : 'one record per event';
+    return `<form class="card rise mt entry" id="entryForm" data-type="${esc(form.id)}" novalidate aria-labelledby="efTitle">
+      <h3 id="efTitle">${ic('pen')}${esc(form.label)} <span class="sub">${esc(PERIOD_WORD[form.period])} · ${esc(once)}</span></h3>
+      <div class="ef-grid">
+        <div class="ef-f"><label class="f" for="ef-plant">Plant <span class="req" aria-hidden="true">*</span></label><select id="ef-plant" aria-describedby="ef-plant-err" required>${plants.map(p => `<option value="${esc(p)}" ${p === defPlant ? 'selected' : ''}>${esc(plantShort(p))}</option>`).join('')}</select>${err('ef-plant')}</div>
+        <div class="ef-f"><label class="f" for="ef-date">${dateLabel} <span class="req" aria-hidden="true">*</span></label><input type="date" id="ef-date" value="${todayLocal()}" max="${todayLocal()}" aria-describedby="ef-date-err" required>${err('ef-date')}</div>
+        ${fields.map(fld).join('')}
+      </div>
+      <div class="ef-msg" role="alert" tabindex="-1" hidden></div>
+      <div class="chips mt"><button class="btn primary" type="submit">${ic('check')} Submit for approval</button><span class="small muted">* required. A different person must approve this before it counts.</span></div>
+    </form>`;
+  }
+  function recTable(scope) {
+    const recs = ui.recs[scope];
+    if (!recs || recs === 'loading') return '<div class="empty">Loading records…</div>';
+    if (recs.error) return `<div class="empty">${esc(recs.error)}</div>`;
+    if (!recs.length) return `<div class="empty">${{ mine: 'You have not entered any records yet.', queue: 'Nothing is waiting for your approval.', all: 'No records yet.' }[scope]}</div>`;
+    return `<table><thead><tr><th>Record</th><th>Form</th><th>Plant</th><th>Date</th><th>Status</th><th>Entered by</th><th>Checks</th><th></th></tr></thead><tbody>${recs.map(r => `<tr><td>R${Number(r.id)}</td><td>${esc(r.formLabel)}</td><td>${esc(plantShort(r.plant))}</td><td>${esc(r.date)}</td><td>${recTag(r.status)}</td><td>${esc(r.submittedByName || r.submittedBy)}</td><td>${r.flags.length ? tag(`${r.flags.length} unusual`, 'warn') : '—'}</td><td><button class="btn sm ${r.canReview ? 'primary' : ''}" data-rec="${Number(r.id)}">${r.canReview ? 'Review' : 'Open'}</button></td></tr>`).join('')}</tbody></table>`;
+  }
+  async function loadRecords(scope, force) {
+    if (!force && ui.recs[scope] !== undefined) return;
+    ui.recs[scope] = 'loading';
+    let out;
+    try { out = (await api(`/api/records?scope=${encodeURIComponent(scope)}&limit=100`)).records; } catch (e) { out = { error: e.message }; }
+    ui.recs[scope] = out;
+    const box = $('#recBox');
+    if (box && ui.recTab === scope) box.innerHTML = recTable(scope);
+  }
+  function pageEntry(params) {
+    const forms = myForms();
+    const reviewer = (S.user.reviewForms || []).length > 0;
+    if (['mine', 'queue', 'all'].includes(params[0])) { ui.recTab = params[0]; params = params.slice(1); }
+    if (ui.recTab === 'queue' && !reviewer) ui.recTab = 'mine';
+    if (ui.recTab === 'all' && S.user.role === 'operator') ui.recTab = 'mine';
+    const fid = forms.includes(params[0]) ? params[0] : forms.includes(ui.lastForm) ? ui.lastForm : forms[0];
+    ui.lastForm = fid || null;
+    loadRecords(ui.recTab);
+    const pending = S.user.pendingReviews || 0;
+    const tabs = [['mine', 'My submissions']];
+    if (reviewer) tabs.push(['queue', `Approval queue${pending ? ` <span class="n">${pending}</span>` : ''}`]);
+    if (S.user.role !== 'operator') tabs.push(['all', 'All records']);
+    const dept = S.user.department && D.SECTIONS[S.user.department] ? D.SECTIONS[S.user.department].name : null;
+    return `${pageHead('Data Entry', `Enter what happened on the floor${dept ? ` in ${esc(dept)}` : ''}. Every KPI on the dashboard is calculated from these records once a different person approves them. Nothing is estimated.`)}
+      ${hint(`<b>How it works:</b> pick a form, fill in the numbers from the shift sheet or register, and submit. The same checks run here and on the server, values far from this plant's history are flagged for the approver, and a duplicate entry is refused. ${reviewer ? 'You can also approve or reject other people\'s records in the approval queue.' : 'Your department head approves or rejects it.'}`)}
+      ${forms.length
+        ? `<div class="chips" aria-label="Forms">${forms.map(id => `<a class="chip ${id === fid ? 'on' : ''}" href="#/entry/${esc(id)}" ${id === fid ? 'aria-current="true"' : ''}>${esc(M.FORMS[id].label)}</a>`).join('')}</div>${entryForm(M.FORMS[fid])}`
+        : `<div class="card empty">Your account does not enter records${['dept', 'operator'].includes(S.user.role) ? '. Ask an administrator to set your department' : ''}.</div>`}
+      ${secT('Records')}
+      <div class="chips" role="tablist" aria-label="Record lists">${tabs.map(([k, l]) => `<button class="chip ${ui.recTab === k ? 'on' : ''}" role="tab" aria-selected="${ui.recTab === k}" data-rtab="${k}">${l}</button>`).join('')}</div>
+      <div class="card tw mt" id="recBox">${recTable(ui.recTab)}</div>`;
+  }
+  function clearEntryErrors(el) {
+    $$('[aria-invalid="true"]', el).forEach(x => x.removeAttribute('aria-invalid'));
+    $$('.ferr', el).forEach(x => { x.hidden = true; x.textContent = ''; });
+    const box = $('.ef-msg', el); box.hidden = true; box.textContent = '';
+  }
+  function showEntryErrors(el, errors) {
+    const general = [];
+    errors.forEach(er => {
+      const c = er.field ? $(`#ef-${CSS.escape(String(er.field))}`, el) : null;
+      if (!c) { general.push(er.error); return; }
+      c.setAttribute('aria-invalid', 'true');
+      const m = $(`#ef-${CSS.escape(String(er.field))}-err`, el);
+      if (m) { m.textContent = er.error; m.hidden = false; }
+    });
+    const box = $('.ef-msg', el);
+    box.innerHTML = `<b>Nothing was saved.</b> ${general.length ? general.map(esc).join(' ') : 'Correct the highlighted fields.'}`;
+    box.hidden = false;
+    const first = $('[aria-invalid="true"]', el);
+    (first || box).focus();
+  }
+  async function submitEntry(el) {
+    if (ui.busy) return;
+    const type = el.dataset.type, def = M.FORMS[type];
+    if (!def) return;
+    const data = {};
+    def.fields.forEach(f => {
+      const c = $(`#ef-${CSS.escape(f.k)}`, el);
+      const v = c ? c.value.trim() : '';
+      if (v === '') return;
+      data[f.k] = f.kind === 'text' || f.kind === 'choice' ? v : Number(v);
+    });
+    const body = { type, plant: $('#ef-plant', el).value, date: $('#ef-date', el).value, data };
+    clearEntryErrors(el);
+    const pre = M.validateRecord(body, todayUtc());
+    if (pre.errors.length) { showEntryErrors(el, pre.errors); return; }
+    const btn = $('button[type="submit"]', el);
+    ui.busy = true; btn.disabled = true;
+    try {
+      const { record: r } = await api('/api/records', { method: 'POST', body });
+      toast(`Saved as R${r.id}${r.flags.length ? `, with ${r.flags.length} unusual value${r.flags.length > 1 ? 's' : ''} flagged for the approver` : ''}. It counts once it is approved.`);
+      def.fields.filter(f => !f.dim).forEach(f => { const c = $(`#ef-${CSS.escape(f.k)}`, el); if (c) c.value = ''; });
+      ui.recs = {};
+      loadRecords(ui.recTab, true);
+    } catch (e) {
+      if (e.status === 422 && e.data && Array.isArray(e.data.errors)) showEntryErrors(el, e.data.errors);
+      else if (e.status !== 401) showEntryErrors(el, [{ field: null, error: e.message }]);
+    } finally { ui.busy = false; btn.disabled = false; }
+  }
+  function findRec(id) {
+    if (ui.recOpen && ui.recOpen.id === id) return ui.recOpen;
+    for (const v of Object.values(ui.recs)) if (Array.isArray(v)) { const r = v.find(x => x.id === id); if (r) return r; }
+    return null;
+  }
+  function openRecord(id, fresh) {
+    const r = fresh || findRec(id);
+    if (!r) return;
+    ui.recOpen = r;
+    const def = M.FORMS[r.type];
+    const shown = v => (typeof v === 'number' ? String(v) : v);
+    const rows = def ? def.fields.filter(f => r.data[f.k] !== undefined).map(f => `<div><span>${esc(f.label)}${f.unit && f.unit !== 'count' ? ` (${esc(f.unit)})` : ''}</span><b>${f.kind === 'yesno' ? (r.data[f.k] ? 'Yes' : 'No') : esc(shown(r.data[f.k]))}</b></div>`).join('') : '';
+    const flags = r.flags.length ? `<div class="blk"><div class="callout">${ic('alert')}<div><b>Check these values before approving.</b><ul style="margin:6px 0 0;padding-left:18px">${r.flags.map(f => `<li>${esc(f.msg)}</li>`).join('')}</ul></div></div></div>` : '';
+    const note = label => `<label class="f" for="recNote">${label}</label><textarea id="recNote" maxlength="500" rows="2"></textarea>`;
+    const decide = r.canReview
+      ? `<div class="blk"><b>Your decision</b>${note('Note (required to reject)')}<div class="chips mt"><button class="btn primary" data-review="${Number(r.id)}:approve">${ic('check')} Approve</button><button class="btn" data-review="${Number(r.id)}:reject">${ic('x')} Reject</button></div><p class="small muted">Approving makes these values count toward the KPIs. Nobody can approve a record they entered.</p></div>`
+      : r.canVoid
+        ? `<div class="blk"><b>Void this approved record</b>${note('Reason (required)')}<div class="chips mt"><button class="btn" data-review="${Number(r.id)}:void">${ic('reset')} Void</button></div><p class="small muted">Approved records are never edited. Void a wrong one with a reason, then enter it again.</p></div>`
+        : r.status === 'submitted' ? '<div class="blk"><p class="small muted">Waiting for an approver. Someone other than the person who entered it must check it.</p></div>' : '';
+    const verb = { approved: 'Approved', rejected: 'Rejected', voided: 'Voided' }[r.status];
+    openDrawer(`<div class="chips">${tag(`R${Number(r.id)}`)}${tag(esc(plantShort(r.plant)))}${recTag(r.status)}</div>
+      <h3 id="drawerTitle">${esc(r.formLabel)}</h3><p class="lede">${esc(r.date)} · entered by ${esc(r.submittedByName || r.submittedBy)} · ${esc(new Date(r.submittedAt).toLocaleString())}</p>
+      ${flags}
+      <div class="blk"><b>Values</b><div class="kv rec">${rows}</div></div>
+      ${verb && r.reviewedBy ? `<div class="blk"><b>${verb} by ${esc(r.reviewedBy)}</b><p class="small">${esc(new Date(r.reviewedAt).toLocaleString())}${r.reviewNote ? ` · “${esc(r.reviewNote)}”` : ''}</p></div>` : ''}
+      ${decide}`, `rec:${r.id}`);
+  }
+  async function refreshMe() {
+    try { const { user } = await api('/api/me'); S.user = user; } catch (e) { /* keep the current profile */ }
+  }
+  async function loadMeasured() {
+    if (!canRead()) { S.m = null; return; }
+    try {
+      S.m = await api(`/api/measured?plant=${encodeURIComponent(S.plant)}&period=${encodeURIComponent(S.period)}`);
+      PALETTE = null; // KPI values in search results changed
+    } catch (e) {
+      S.m = null;
+      if (e.status !== 401) toast(`Could not load measured KPIs: ${e.message}`, 'bad');
+    }
+  }
+  async function reviewRecord(id, decision) {
+    if (ui.busy) return;
+    const r = findRec(id);
+    if (!r) return;
+    const box = $('#recNote');
+    const note = box ? box.value.trim() : '';
+    if (decision !== 'approve' && note.length < 3) { toast('Give a reason (at least 3 characters).', 'bad'); if (box) { box.setAttribute('aria-invalid', 'true'); box.focus(); } return; }
+    ui.busy = true; document.body.classList.add('busy');
+    let fresh = null;
+    try {
+      fresh = (await api(`/api/records/${Number(id)}/review`, { method: 'POST', body: { decision, version: r.version, note: note || undefined } })).record;
+      toast(`R${id} ${fresh.status}.${decision === 'approve' ? ' Its values now count toward the KPIs.' : ''}`);
+    } catch (e) {
+      if (e.status === 409 && e.data && e.data.record) { fresh = e.data.record; toast(e.message, 'bad'); }
+      else if (e.status !== 401) toast(e.message, 'bad');
+    } finally { ui.busy = false; document.body.classList.remove('busy'); }
+    if (!fresh) return;
+    ui.recs = {};
+    await Promise.all([refreshMe(), loadMeasured()]);
+    if (ui.drawerFor === `rec:${id}`) openRecord(id, fresh);
+    rerender();
+  }
+
   // ---------------------------------------------------------------- page: Formula Lab
   function calcCard(r, i) {
     return `<div class="card calc rise" style="--i:${i % 12}" id="calc-${r.id}" data-calc="${r.id}">
@@ -722,7 +1015,8 @@
   // ---------------------------------------------------------------- page: Benchmarks
   function pageBench() {
     const conf = { verified: ['Verified source', 'good'], vendor: ['Vendor-reported', 'warn'], norm: ['Practitioner norm', 'acc'] };
-    const rows = D.BENCHMARKS.map(b => `<tr><td><b>${esc(b[0])}</b></td><td>${tag(`${esc(fmtVal(b[1]))} ${esc(b[2])}`, 'bad')}</td><td>${esc(b[3])}</td><td>${esc(b[4])}</td><td>${tag(conf[b[5]][0], conf[b[5]][1])}</td><td class="wrap">${esc(b[6])}</td></tr>`).join('');
+    const ours = b => { const r = BENCH_KPI[b[0]] ? kvKey(BENCH_KPI[b[0]]) : null; return r && r.value !== null ? tag(`${esc(fmtVal(r.value))}${esc(uOf(r.unit))}`, r.status) : tag('Not measured'); };
+    const rows = D.BENCHMARKS.map(b => `<tr><td><b>${esc(b[0])}</b></td><td>${ours(b)}</td><td>${esc(b[3])}</td><td>${esc(b[4])}</td><td>${tag(conf[b[5]][0], conf[b[5]][1])}</td><td class="wrap">${esc(b[6])}</td></tr>`).join('');
     const fixes = [
       ['Right-first-time dyeing programme', 'Evince Textiles, Bangladesh (IFC PaCT)', 'RFT from 80% to 95.5% for USD 216K. Daily scale calibration, testing against the standard rather than the running lot, auxiliary chemical QC, auto-dispensing, pass/fail limits. Yearly savings of 87.7K m³ water, 764K m³ gas, 2.1 GWh and 117 t chemicals.', 'verified', 'F07'],
       ['Digital lab-dip approval', 'Brand and mill case studies (Datacolor, X-Rite)', 'Approval cycles cut from 40–50 days to about 10, and 10–15 days taken off time to market, using calibrated spectro and digital standards.', 'vendor', 'F08'],
@@ -733,40 +1027,43 @@
     ];
     return `${pageHead('Benchmarks', 'Where the group stands against world-class and typical South Asian mills. Each benchmark is labelled with its source confidence so decisions are not built on marketing numbers.')}
       ${hint('<b>Read the confidence label.</b> "Verified source" is a primary or peer-reviewed source. "Vendor-reported" figures are probably optimistic. "Practitioner norm" is common industry practice with no single source. Calibrate targets with your own data.')}
-      <div class="card tw rise"><table><thead><tr><th>Metric</th><th>Ours (dummy)</th><th>World-class</th><th>Typical South Asia</th><th>Confidence</th><th>Note</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="card tw rise"><table><thead><tr><th>Metric</th><th>Ours (measured)</th><th>World-class</th><th>Typical South Asia</th><th>Confidence</th><th>Note</th></tr></thead><tbody>${rows}</tbody></table></div>
       ${secT('Proven fixes behind the recommendations')}
       <div class="grid g-auto-l">${fixes.map((x, i) => `<div class="card lift rise" style="--i:${i}"><h3>${ic('spark')}${esc(x[0])}</h3><div class="chips" style="margin-bottom:8px">${tag(conf[x[3]][0], conf[x[3]][1])}${tag(esc(x[1]))}</div><p class="muted small" style="margin:0 0 12px">${esc(x[2])}</p><button class="btn sm" data-open="${x[4]}">See the matching finding ${ic('arrow')}</button></div>`).join('')}</div>`;
   }
 
   // ---------------------------------------------------------------- page: Data & Governance
   function pageData() {
-    const avg = Math.round(D.DATA_GROUPS.reduce((s, g) => s + g.complete, 0) / D.DATA_GROUPS.length);
-    const cnt = st => D.DATA_GROUPS.filter(g => g.status === st).length;
-    const steps = [['Gather', 'Read-only connectors'], ['Reconcile', 'Link order, lot, batch'], ['Audit', 'Modules in parallel'], ['Measure', 'Glossary formulas'], ['Decide', 'Threshold & SPC rules'], ['Quantify', 'PKR & priority score'], ['Recommend', 'Root cause + owner'], ['Report', 'Brief + audit trail']];
-    return `${pageHead('Data & Governance', 'The AI audit is only as good as its data. These are the data fields the glossary says to prioritise first, where each comes from, and how complete it is today.')}
+    const c = cov();
+    const steps = [['Enter', 'Staff fill department forms'], ['Validate', 'Same rules in browser and server'], ['Flag', 'Outliers vs plant history'], ['Approve', 'A different person checks'], ['Measure', 'Formulas on approved records'], ['Test', 'Control chart, trend, Welch t'], ['Quantify', 'PKR at finance cost rates'], ['Act', 'Findings become 8D actions']];
+    const secCards = Object.entries(c.bySection).map(([sid, b], i) => {
+      const pct = b.applicable ? Math.round(b.measured / b.applicable * 100) : 0;
+      const forms = Object.values(M.FORMS).filter(f => f.depts.includes(sid));
+      return `<div class="card lift rise" style="--i:${i % 12}">
+        <h3>${ic(SEC_IC[D.SECTIONS[sid].icon] || 'db')}${esc(D.SECTIONS[sid].name)}<span class="sub">${b.measured} of ${b.applicable} KPIs</span></h3>
+        <div class="k-sub"><span>Measured</span><span><b>${pct}%</b></span></div>
+        <div class="meter ${pct >= 85 ? 'good' : pct >= 40 ? 'warn' : 'bad'}"><i style="--w:${pct}%"></i></div>
+        <div class="fieldchips mt">${forms.map(f => `<span>${esc(f.label)} · ${esc(PERIOD_WORD[f.period].toLowerCase())}</span>`).join('')}</div>
+        <div class="mt"><button class="btn sm" data-go="${secRoute(sid)}">Open ${esc(D.SECTIONS[sid].name)} ${ic('arrow')}</button></div></div>`;
+    }).join('');
+    return `${pageHead('Data & Governance', 'Where every number comes from. KPIs are calculated only from records that department staff entered and a different person approved. Nothing is estimated or filled in.')}
       <div class="grid g-wide">
-        <div class="card hero glass rise" style="grid-template-columns:auto 1fr">${ring(avg, 'Data readiness')}<div>
-          <div class="eyebrow">Data confidence</div><h2 style="font-size:21px">Data is <em>${avg}% complete</em> across the 8 priority groups.</h2>
-          <p>Findings that rest on manual or missing data carry lower confidence scores, and the system says so. Close the gaps marked in red to raise confidence in the money figures.</p>
-          <div class="chips mt">${tag(`${cnt('connected')} connected`, 'good')}${tag(`${cnt('partial')} partial`, 'warn')}${tag(`${cnt('manual')} manual`, 'bad')}${tag(`${cnt('missing')} missing`, 'bad')}</div></div></div>
-        <div class="card rise" style="--i:1"><h3>${ic('shield')}AI governance built in</h3><ul class="gov" style="margin:0;padding-left:18px">
-          <li><b>Human in the loop:</b> no fix starts without approval by an approver role.</li>
-          <li><b>Evidence first:</b> every finding shows why, so what, do what and who, with a confidence score.</li>
-          <li><b>Read-only connectors:</b> the audit never writes to the ERP or MES.</li>
-          <li><b>Effectiveness check:</b> an action closes only on a measured result. If the target is missed, it reopens.</li>
-          <li><b>Audit trail:</b> every approval, start, verification and reopening is logged with role and time.</li>
-          <li><b>Honest labels:</b> benchmarks are marked verified, vendor-reported or practitioner norm.</li></ul></div>
+        <div class="card hero glass rise" style="grid-template-columns:auto 1fr">${ring(Math.round(c.pct), 'Measured')}<div>
+          <div class="eyebrow">Measurement coverage · ${esc(per().name)}</div><h2 style="font-size:21px"><em>${esc(fmtVal(c.pct))}%</em> of KPIs are measured (${c.measured} of ${c.applicable}).</h2>
+          <p>A KPI counts as measured when approved records for it exist in the selected period and plant. The rest show "Not measured" with the form that would fill them. Raise coverage by entering the forms below.</p>
+          <div class="chips mt">${tag(`${c.records} approved records`, 'good')}${tag(`${c.applicable - c.measured} KPIs not measured`, c.applicable - c.measured ? 'warn' : 'good')}</div></div></div>
+        <div class="card rise" style="--i:1"><h3>${ic('shield')}How the numbers are kept honest</h3><ul class="gov" style="margin:0;padding-left:18px">
+          <li><b>Maker-checker:</b> staff enter, a head approves. Nobody approves their own record.</li>
+          <li><b>Never edited:</b> approved records are voided with a reason and entered again; the database refuses changes.</li>
+          <li><b>Checked twice:</b> the same rules run in the form and on the server, and duplicates are refused.</li>
+          <li><b>Outlier flags:</b> values far from the plant's own history are shown to the approver.</li>
+          <li><b>Statistics, not guesses:</b> control charts, trend tests and Welch t-tests explain each gap.</li>
+          <li><b>Audit trail:</b> every entry, approval, rejection and void is in the hash-chained log.</li></ul></div>
       </div>
-      ${secT('How the audit runs (every month)')}
+      ${secT('How a number gets onto the dashboard')}
       <div class="pipe">${steps.map((s, i) => `<div style="--i:${i}"><span class="no">${i + 1}</span><b>${esc(s[0])}</b><span>${esc(s[1])}</span></div>`).join('')}</div>
-      ${secT('Priority data fields')}
-      <div class="grid g-auto-l">${D.DATA_GROUPS.map((g, i) => `<div class="card lift rise" style="--i:${i}">
-        <h3>${ic('db')}${esc(g.name)}<span class="sub"><span class="ds-st ${g.status}">${esc(g.status)}</span></span></h3>
-        <div class="fieldchips">${g.fields.map(x => `<span>${esc(x)}</span>`).join('')}</div>
-        <div class="k-sub mt"><span>Completeness</span><span><b>${g.complete}%</b></span></div>
-        <div class="meter ${g.complete >= 85 ? 'good' : g.complete >= 60 ? 'warn' : 'bad'}"><i style="--w:${g.complete}%"></i></div>
-        <div class="k-sub mt"><span>Source: ${esc(g.src)}</span><span>Refresh: ${esc(g.fresh)}</span></div>
-        <p class="small muted" style="margin:10px 0 0"><b style="color:var(--text)">Gap:</b> ${esc(g.gap)}</p></div>`).join('')}</div>`;
+      ${secT('Coverage by area')}
+      <div class="grid g-auto-l">${secCards || '<div class="card empty">No KPIs apply to this plant.</div>'}</div>`;
   }
 
   // ---------------------------------------------------------------- drawer
@@ -795,6 +1092,8 @@
     const eff = a.stage === 'verified' ? isEffective(f, a) : null;
     const canApprove = userCanApprove();
     const u = f.kpi.unit === '%' ? '%' : f.kpi.unit ? ' ' + f.kpi.unit : '';
+    const mKey = M.FINDING_KPI[f.id] || `${f.sec}|${f.kpi.name}`;
+    const now = M.META[mKey] ? kvKey(mKey) : null;
     const hist = a.hist.slice().reverse().map(h => `<div><span>${esc(new Date(h.t).toLocaleString())}</span><b>${esc(h.e)}</b></div>`).join('');
     const may = canAct(f);
     const why = may ? '' : whyCannot(f);
@@ -807,8 +1106,9 @@
       <h3 id="drawerTitle">${esc(f.title)}</h3><p class="lede">${esc(f.where)}</p>
       <div class="kv"><div><span>${f.cash ? 'Cash to release' : 'Leakage ' + esc(per().per)}</span><b>${f.cash ? fmt.pkr(f.cash) : money(f.pkr)}</b></div><div><span>Recoverable</span><b>${Math.round(f.rec * 100)}%</b></div><div><span>Priority score</span><b>${scoreOf(f)}</b></div></div>
       <div class="blk"><b>Progress</b><div class="stages">${RCA.STAGES.map((s, i) => `<span class="${i <= idx ? 'on' : ''}" title="${STAGE_NAME[s]}"></span>`).join('')}</div><div class="k-sub mt"><span>${STAGE_NAME[a.stage]}: ${STAGE_DESC[a.stage]}</span><span>Due ${esc(a.due)}</span></div></div>
-      <div class="blk"><b>Measure of success</b><div class="kv"><div><span>Baseline</span><b>${esc(fmtVal(f.kpi.base))}${esc(u)}</b></div><div><span>Target</span><b>${esc(fmtVal(f.kpi.target))}${esc(u)}</b></div><div><span>After fix</span><b>${a.after === null ? '—' : esc(fmtVal(a.after)) + esc(u)}</b></div></div></div>
-      <div class="blk"><div class="wsd"><div><b>Why (evidence)</b>${esc(f.why)}</div><div><b>So what</b>${esc(f.sowhat)}</div><div class="do"><b>Do what</b>${esc(f.dowhat)}</div><div><b>Who owns it</b>${esc(f.who)}</div><div><b>Confidence</b>${Math.round(f.conf * 100)}%. Based on linked ERP/MES/QC records (simulated in this prototype).</div></div></div>
+      <div class="blk"><b>Measure of success</b><div class="kv"><div><span>Baseline (estimate)</span><b>${esc(fmtVal(f.kpi.base))}${esc(u)}</b></div><div><span>Target</span><b>${esc(fmtVal(f.kpi.target))}${esc(u)}</b></div><div><span>After fix</span><b>${a.after === null ? '—' : esc(fmtVal(a.after)) + esc(u)}</b></div></div>
+        ${now ? `<div class="k-sub mt"><span>Measured now from approved records: <b>${esc(valTxt(now))}</b>${now.value !== null ? ` (${now.n} records)` : ''}</span><button class="btn sm ghost" data-kpi="${kpiRef(mKey)}">KPI evidence ${ic('arrow')}</button></div>` : ''}</div>
+      <div class="blk"><div class="wsd"><div><b>Why (evidence)</b>${esc(f.why)}</div><div><b>So what</b>${esc(f.sowhat)}</div><div class="do"><b>Do what</b>${esc(f.dowhat)}</div><div><b>Who owns it</b>${esc(f.who)}</div><div><b>Confidence</b>${Math.round(f.conf * 100)}% (audit-playbook estimate). The money and baseline are estimates until the KPI above is measured from approved records.</div></div></div>
       ${ctl}
       <div class="blk"><b>8D checklist</b><div class="d8">${D8.map((l, k) => `<label><input type="checkbox" data-d8="${f.id}:${k}" ${a.d8[k] ? 'checked' : ''} ${may ? '' : 'disabled'}> ${esc(l)}</label>`).join('')}</div></div>
       <div class="blk"><div class="chips"><button class="btn sm" data-go="#/rca/node/${f.node}">${ic('tree')} Trace root cause</button><button class="btn sm" data-go="${secRoute(f.sec)}">${ic('factory')} Open ${esc(D.SECTIONS[f.sec].name)}</button></div></div>
@@ -826,32 +1126,51 @@
     openDrawer(`<div class="chips">${tag(esc(g.domain), 'acc')}${tag('Glossary')}</div><h3 id="drawerTitle">${esc(g.term)}</h3><p class="lede">${esc(g.def)}</p>
       <div class="wsd"><div><b>Why it matters</b>${esc(g.why)}</div><div><b>Formula / example</b>${esc(g.ex)}</div></div>
       ${termCalc(g.f)}
-      ${kpis.length ? `<div class="blk"><b>Tracked live as</b><div class="rows">${kpis.map(([sid, i, k]) => `<button class="next" data-kpi="${sid}:${i}"><span class="rk">${ic('target')}</span><span><span class="t">${esc(k[0])}</span><span class="s">${esc(D.SECTIONS[sid].name)} · target ${esc(fmtVal(k[3]))}</span></span><span class="r"><b style="color:var(--${kStatus(k) === 'good' ? 'good' : kStatus(k) === 'warn' ? 'warn' : 'bad'})">${esc(fmtVal(k[1]))} ${esc(k[2])}</b></span></button>`).join('')}</div></div>` : ''}
+      ${kpis.length ? `<div class="blk"><b>Tracked as</b><div class="rows">${kpis.map(([sid, i, k]) => { const r = kv(sid, k[0]); return `<button class="next" data-kpi="${sid}:${i}"><span class="rk">${ic('target')}</span><span><span class="t">${esc(k[0])}</span><span class="s">${esc(D.SECTIONS[sid].name)} · target ${esc(fmtVal(k[3]))}</span></span><span class="r"><b style="color:var(--${r.value === null ? 'faint' : r.status})">${esc(valTxt(r))}</b></span></button>`; }).join('')}</div></div>` : ''}
       <div class="blk"><button class="btn sm" data-go="${secRoute(g.sec)}">${ic('arrow')} Where it's tracked: ${esc(D.SECTIONS[g.sec].name)}</button></div>`, 'term');
   }
   function openKpi(key) {
     const [sid, idx] = key.split(':');
     const s = D.SECTIONS[sid]; const k = s && s.kpis[+idx];
     if (!k) return;
-    const st = kStatus(k);
+    const r = kv(sid, k[0]);
+    const u = uOf(k[2]);
     const g = D.GLOSSARY.find(x => x.term === k[6]);
     const fs = ranked(D.FINDINGS.filter(f => f.sec === sid)).slice(0, 3);
-    openDrawer(`<div class="chips">${tag(esc(s.name), 'acc')}${stTag(st)}</div><h3 id="drawerTitle">${esc(k[0])}</h3>
-      <div class="kv"><div><span>Actual</span><b>${esc(fmtVal(k[1]))} ${esc(k[2])}</b></div><div><span>Target</span><b>${esc(fmtVal(k[3]))} ${esc(k[2])}</b></div><div><span>Direction</span><b>${k[4] === 'up' ? 'Higher is better' : 'Lower is better'}</b></div></div>
+    const mf = measuredFindings().find(f => f.key === r.key);
+    const canForm = !!r.form && myForms().includes(r.form);
+    const where = S.plant === 'all' ? 'the group' : plantShort(S.plant);
+    const enter = label => (canForm ? `<button class="btn sm primary" data-go="#/entry/${esc(r.form)}">${ic('pen')} ${label}</button>` : '');
+    const src = r.value === null
+      ? `<div class="blk"><div class="callout">${ic('info')}<div><b>Not measured.</b> There are no approved ${esc(r.formLabel || 'records')} for ${esc(where)} in the ${esc(per().name.toLowerCase())}. ${canForm ? 'You can enter one now; a different person approves it before it counts.' : 'The department enters it and a head approves it before it counts.'}</div>${enter(`Enter ${esc(r.formLabel)}`)}</div></div>`
+      : r.source === 'feed'
+        ? `<div class="blk"><b>Source</b><p class="small">Live data feed (${esc(r.feed.source)}), as of ${esc(r.last)}. No approved department records yet.</p></div>`
+        : `<div class="blk"><b>Source</b><p class="small">${r.n} approved ${esc(r.formLabel)} record${r.n === 1 ? '' : 's'}${r.first ? ` from ${esc(r.first)} to ${esc(r.last)}` : ''}, ${esc(where)}.${r.stale ? ' <b>No new records lately, so this value may be out of date.</b>' : ''}</p>${enter('Enter more')}</div>`;
+    const pareto = mf && mf.evidence.find(e => e.kind === 'pareto');
+    openDrawer(`<div class="chips">${tag(esc(s.name), 'acc')}${stTag(r.status)}${r.value !== null ? tag(r.source === 'feed' ? 'Live feed' : 'Measured', 'good') : ''}</div><h3 id="drawerTitle">${esc(k[0])}</h3>
+      <div class="kv"><div><span>${r.value === null ? 'Measured' : r.source === 'feed' ? 'Feed value' : 'Measured'}</span><b>${r.value === null ? '—' : esc(fmtVal(r.value)) + esc(u)}</b></div><div><span>Target</span><b>${esc(fmtVal(k[3]))}${esc(u)}</b></div><div><span>Direction</span><b>${k[4] === 'up' ? 'Higher is better' : 'Lower is better'}</b></div></div>
+      ${src}
+      ${r.formula ? `<div class="blk"><b>How it is calculated</b><p class="small mono" style="margin:0">${esc(r.formula)}</p></div>` : ''}
+      ${r.series && r.series.length >= 2 ? `<div class="blk">${seriesChart(r, 'Measured by date')}</div>` : ''}
+      ${mf ? `<div class="blk"><b>Evidence</b>${evList(mf.evidence.filter(e => e.kind !== 'pareto' && e.kind !== 'measure'))}${pareto ? `<div class="mt">${chartPareto({ items: pareto.items.map(x => [x.label, x.value]) })}</div>` : ''}</div>` : ''}
+      ${mf && mf.hypotheses.length ? `<div class="blk"><b>Likely causes to check (audit playbook)</b><div class="rows">${mf.hypotheses.map(h => `<button class="next" data-open="${esc(h.id)}"><span class="rk">${ic('tree')}</span><span><span class="t">${esc(h.title)}</span><span class="s">Baseline hypothesis, confirm with the evidence above</span></span></button>`).join('')}</div></div>` : ''}
       <div class="blk"><b>Benchmark</b><p class="muted" style="margin:0">${esc(k[5])}</p></div>
       ${g ? `<div class="blk"><b>What it means · ${esc(g.term)}</b><div class="wsd"><div><b>Definition</b>${esc(g.def)}</div><div><b>Why it matters</b>${esc(g.why)}</div></div></div>` : ''}
       ${termCalc(k[7])}
-      ${fs.length ? `<div class="blk"><b>Findings behind this area</b><div class="rows">${fs.map((f, i) => `<button class="next" data-open="${f.id}"><span class="rk">${i + 1}</span><span><span class="t">${esc(f.title)}</span><span class="s">${esc(f.who)}</span></span><span class="r"><b>${f.cash ? fmt.pkr(f.cash) : money(f.pkr)}</b></span></button>`).join('')}</div></div>` : ''}`, 'kpi');
+      ${fs.length && canRead() ? `<div class="blk"><b>Audit playbook for this area (baseline estimates)</b><div class="rows">${fs.map((f, i) => `<button class="next" data-open="${f.id}"><span class="rk">${i + 1}</span><span><span class="t">${esc(f.title)}</span><span class="s">${esc(f.who)}</span></span><span class="r"><b>${f.cash ? fmt.pkr(f.cash) : money(f.pkr)}</b><span>estimate</span></span></button>`).join('')}</div></div>` : ''}`, 'kpi');
   }
 
   // ---------------------------------------------------------------- command palette
   function paletteItems() {
     const items = [];
-    NAV.forEach(g => g.items.forEach(([id, name, icon]) => items.push({ label: name, sub: g.g, kind: 'Page', icon, go: `#/${id}` })));
-    Object.entries(D.SECTIONS).forEach(([id, s]) => items.push({ label: s.name, sub: s.intro, kind: 'Area', icon: SEC_IC[s.icon] || 'factory', go: secRoute(id) }));
-    D.SYMPTOMS.forEach(s => items.push({ label: `Why: ${G[s].label}`, sub: G[s].metric, kind: 'Root cause', icon: 'tree', go: `#/rca/${s}` }));
-    D.FINDINGS.forEach(f => items.push({ label: f.title, sub: `${f.who} · ${f.where}`, kind: 'Finding', icon: 'alert', open: f.id }));
-    Object.entries(D.SECTIONS).forEach(([sid, s]) => s.kpis.forEach((k, i) => items.push({ label: k[0], sub: `${s.name} KPI · ${fmtVal(k[1])} ${k[2]}`, kind: 'KPI', icon: 'target', kpi: `${sid}:${i}` })));
+    navFor().forEach(g => g.items.forEach(([id, name, icon]) => items.push({ label: name, sub: g.g, kind: 'Page', icon, go: `#/${id}` })));
+    myForms().forEach(id => items.push({ label: M.FORMS[id].label, sub: `Data entry form · ${PERIOD_WORD[M.FORMS[id].period]}`, kind: 'Form', icon: 'pen', go: `#/entry/${id}` }));
+    if (canRead()) {
+      Object.entries(D.SECTIONS).forEach(([id, s]) => items.push({ label: s.name, sub: s.intro, kind: 'Area', icon: SEC_IC[s.icon] || 'factory', go: secRoute(id) }));
+      D.SYMPTOMS.forEach(s => items.push({ label: `Why: ${G[s].label}`, sub: G[s].metric, kind: 'Root cause', icon: 'tree', go: `#/rca/${s}` }));
+      D.FINDINGS.forEach(f => items.push({ label: f.title, sub: `Playbook estimate · ${f.who} · ${f.where}`, kind: 'Finding', icon: 'alert', open: f.id }));
+      Object.entries(D.SECTIONS).forEach(([sid, s]) => s.kpis.forEach((k, i) => items.push({ label: k[0], sub: `${s.name} KPI · ${valTxt(kv(sid, k[0]))}`, kind: 'KPI', icon: 'target', kpi: `${sid}:${i}` })));
+    }
     REG.forEach(r => items.push({ label: r.name, sub: r.formula, kind: 'Calculator', icon: 'calc', go: `#/lab/${r.id}` }));
     D.GLOSSARY.forEach(g => items.push({ label: g.term, sub: g.def, kind: 'Term', icon: 'book', term: g.term }));
     return items;
@@ -864,7 +1183,7 @@
     const inp = $('#pIn'); inp.value = ''; renderPalette(''); setTimeout(() => inp.focus(), 30);
   }
   function renderPalette(q) {
-    const res = q.trim() ? util.search(q, PALETTE, x => x.label, x => `${x.sub} ${x.kind}`).slice(0, 14) : PALETTE.filter(x => x.kind === 'Page' || x.kind === 'Root cause').slice(0, 14);
+    const res = q.trim() ? util.search(q, PALETTE, x => x.label, x => `${x.sub} ${x.kind}`).slice(0, 14) : PALETTE.filter(x => ['Page', 'Root cause', 'Form'].includes(x.kind)).slice(0, 14);
     ui.pItems = res; ui.pIdx = 0;
     $('#pList').innerHTML = res.length ? res.map((x, i) => `<div class="p-item ${i === 0 ? 'on' : ''}" role="option" aria-selected="${i === 0}" data-pi="${i}">${ic(x.icon)}<span>${esc(x.label)}<br><small>${esc(String(x.sub).slice(0, 90))}</small></span>${tag(esc(x.kind))}</div>`).join('') : '<div class="empty">Nothing found.</div>';
   }
@@ -878,30 +1197,15 @@
     else if (x.kpi) openKpi(x.kpi);
   }
 
-  // ---------------------------------------------------------------- scan simulation
-  function runScan() {
-    const steps = ['Gathering data from ERP, MES, QC, WMS and finance', 'Ingesting, cleaning and reconciling lots and orders', 'Running audit modules in parallel', 'Computing tracked metrics from glossary formulas', 'Checking thresholds and control limits', 'Quantifying leakage in PKR and ranking priorities', 'Tracing root causes and drafting recommendations', 'Writing the audit report and trail'];
-    const m = $('#modal');
-    ui.lastFocus = document.activeElement;
-    m.innerHTML = `<h3 id="modalTitle">${ic('spark')} Running AI audit scan</h3><p class="muted small" style="margin:0">Simulation on prototype dummy data.</p><div class="scan-steps">${steps.map(s => `<div><i></i>${esc(s)}</div>`).join('')}</div><div class="progress"><i></i></div>`;
-    m.classList.add('on'); $('#scrim').classList.add('on');
-    const rows = $$('.scan-steps div', m); const bar = $('.progress i', m);
-    let i = 0; const dt = reduced ? 30 : 380;
-    (function tick() {
-      if (i > 0) { rows[i - 1].classList.remove('run'); rows[i - 1].classList.add('done'); rows[i - 1].querySelector('i').textContent = '✓'; }
-      bar.style.width = `${(i / steps.length) * 100}%`;
-      if (i === steps.length) {
-        setTimeout(() => {
-          m.classList.remove('on'); $('#scrim').classList.remove('on');
-          S.lastScan = new Date().toISOString();
-          const t = totals(findingsFor());
-          toast(`Scan complete: ${findingsFor().length} findings, ${money(t.leak)} ${per().per} leakage and ${fmt.pkr(t.cash)} cash to release, ranked by priority.`);
-          rerender(true);
-        }, reduced ? 10 : 350);
-        return;
-      }
-      rows[i].classList.add('run'); i++; setTimeout(tick, dt);
-    })();
+  // ---------------------------------------------------------------- refresh measurements (recalculate from approved records)
+  async function runScan() {
+    const b = $('#scanBtn');
+    if (b.disabled) return;
+    b.disabled = true;
+    await loadMeasured();
+    b.disabled = false;
+    rerender();
+    if (S.m) { const c = cov(); toast(`Recalculated from ${c.records} approved record${c.records === 1 ? '' : 's'}: ${fmtVal(c.pct)}% of KPIs measured, ${S.m.findings.length} off target.`); }
   }
 
   // ---------------------------------------------------------------- toasts & animation helpers
@@ -928,21 +1232,25 @@
   }
 
   // ---------------------------------------------------------------- router
-  const ROUTES = { command: pageCommand, rca: pageRca, audits: pageAudits, ops: pageOps, planning: pagePlanning, supply: pageSupply, finance: pageFinance, actions: pageActions, lab: pageLab, glossary: pageGlossary, bench: pageBench, data: pageData };
+  const ROUTES = { command: pageCommand, entry: pageEntry, rca: pageRca, audits: pageAudits, ops: pageOps, planning: pagePlanning, supply: pageSupply, finance: pageFinance, actions: pageActions, lab: pageLab, glossary: pageGlossary, bench: pageBench, data: pageData };
   function parse() {
     const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(p => { try { return decodeURIComponent(p); } catch (e) { return ''; } });
-    const page = ROUTES[parts[0]] ? parts[0] : 'command';
-    return { page, params: parts.slice(1) };
+    const allowed = new Set(navFor().flatMap(g => g.items.map(([id]) => id)));
+    const fallback = allowed.has('command') ? 'command' : 'entry';
+    const page = ROUTES[parts[0]] && allowed.has(parts[0]) ? parts[0] : fallback;
+    return { page, params: page === parts[0] ? parts.slice(1) : [] };
   }
   function go(h) { if (location.hash === h) rerender(); else location.hash = h; }
   function renderNav(page) {
-    const list = findingsFor();
     const canApprove = userCanApprove();
-    const badge = list.filter(f => canApprove ? S.actions[f.id].stage === 'diagnosed' : ['approved', 'in_progress'].includes(S.actions[f.id].stage)).length;
-    $('#nav').innerHTML = NAV.map(g => `<div class="nav-g">${esc(g.g)}</div>${g.items.map(([id, name, icon]) => `<a href="#/${id}" ${id === page ? 'aria-current="page"' : ''} title="${esc(name)}">${ic(icon)}<span>${esc(name)}</span>${id === 'actions' && badge ? `<span class="badge" aria-label="${badge} need attention">${badge}</span>` : ''}</a>`).join('')}`).join('');
+    const badge = canRead() ? findingsFor().filter(f => { const a = S.actions[f.id]; return a && (canApprove ? a.stage === 'diagnosed' : ['approved', 'in_progress'].includes(a.stage)); }).length : 0;
+    const pending = (S.user && S.user.pendingReviews) || 0;
+    const badgeFor = id => { const n = id === 'actions' ? badge : id === 'entry' ? pending : 0; return n ? `<span class="badge" aria-label="${n} need attention">${n}</span>` : ''; };
+    $('#nav').innerHTML = navFor().map(g => `<div class="nav-g">${esc(g.g)}</div>${g.items.map(([id, name, icon]) => `<a href="#/${id}" ${id === page ? 'aria-current="page"' : ''} title="${esc(name)}">${ic(icon)}<span>${esc(name)}</span>${badgeFor(id)}</a>`).join('')}`).join('');
   }
   function rerender(scroll) {
     const { page, params } = parse();
+    if (!location.hash.replace(/^#\/?/, '').startsWith(page)) history.replaceState(null, '', `#/${page}`); // show where we really are
     const meta = PAGE_META[page];
     renderNav(page);
     $('#title').textContent = meta.name;
@@ -967,13 +1275,14 @@
     $$('[data-ic]').forEach(el => { el.outerHTML = ic(el.dataset.ic); });
     $('#menuBtn').innerHTML = ic('menu');
     $('#searchBtn').innerHTML = `${ic('search')}<span class="lbl">Search everything</span><span class="kbd">Ctrl K</span>`;
-    $('#scanBtn').innerHTML = `${ic('spark')}<span>Run AI scan</span>`;
+    $('#scanBtn').innerHTML = `${ic('reset')}<span>Refresh measurements</span>`;
+    $('#scanBtn').title = 'Recalculate every KPI from approved records';
     const setThemeIcon = () => { $('#themeBtn').innerHTML = ic(document.documentElement.dataset.theme === 'light' ? 'moon' : 'sun'); };
     setThemeIcon();
     $('#plantSel').innerHTML = D.PLANTS.map(p => `<option value="${p.id}" ${p.id === S.plant ? 'selected' : ''}>${esc(p.short)}</option>`).join('');
     $('#periodSel').innerHTML = PERIODS.map(p => `<option value="${p.id}" ${p.id === S.period ? 'selected' : ''}>${esc(p.name)}</option>`).join('');
-    $('#plantSel').addEventListener('change', e => { S.plant = e.target.value; save(); rerender(); toast(`Showing ${(D.PLANTS.find(p => p.id === S.plant) || {}).name}`); });
-    $('#periodSel').addEventListener('change', e => { S.period = e.target.value; save(); rerender(); });
+    $('#plantSel').addEventListener('change', async e => { S.plant = e.target.value; save(); await loadMeasured(); rerender(); toast(`Showing ${(D.PLANTS.find(p => p.id === S.plant) || {}).name}`); });
+    $('#periodSel').addEventListener('change', async e => { S.period = e.target.value; save(); await loadMeasured(); rerender(); });
     $('#userBtn').addEventListener('click', openAccount);
     $('#themeBtn').addEventListener('click', () => {
       const t = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
@@ -997,12 +1306,21 @@
     $('#pList').addEventListener('click', e => { const it = e.target.closest('[data-pi]'); if (it) pickPalette(+it.dataset.pi); });
 
     document.addEventListener('click', e => {
-      const t = e.target.closest('[data-go],[data-open],[data-term],[data-kpi],[data-adv],[data-reopen],[data-verify],[data-close],[data-gdom],[data-letter],[data-ldom],#exportCsv,#verifyChain,#signOut,.nav a');
+      const t = e.target.closest('[data-go],[data-open],[data-term],[data-kpi],[data-adv],[data-reopen],[data-verify],[data-close],[data-gdom],[data-letter],[data-ldom],[data-rec],[data-review],[data-rtab],#exportCsv,#verifyChain,#signOut,.nav a');
       if ($('#side').classList.contains('open') && !e.target.closest('#side')) { $('#side').classList.remove('open'); $('#menuBtn').setAttribute('aria-expanded', 'false'); if (!t) return; }
       if (!t || t.disabled) return;
       if (t.matches('.nav a')) { $('#side').classList.remove('open'); $('#menuBtn').setAttribute('aria-expanded', 'false'); return; }
       if (t.dataset.go !== undefined) { e.preventDefault(); const inDrawer = t.closest('#drawer'); if (inDrawer) closeOverlays(); go(t.dataset.go); return; }
       if (t.dataset.open) { openFinding(t.dataset.open); return; }
+      if (t.dataset.rec) { openRecord(Number(t.dataset.rec)); return; }
+      if (t.dataset.review) { const [rid, dec] = t.dataset.review.split(':'); reviewRecord(Number(rid), dec); return; }
+      if (t.dataset.rtab) {
+        ui.recTab = t.dataset.rtab;
+        $$('[data-rtab]').forEach(c => { const on = c.dataset.rtab === ui.recTab; c.classList.toggle('on', on); c.setAttribute('aria-selected', String(on)); });
+        const box = $('#recBox'); if (box) box.innerHTML = recTable(ui.recTab);
+        loadRecords(ui.recTab);
+        return;
+      }
       if (t.dataset.term) { openTerm(t.dataset.term); return; }
       if (t.dataset.kpi) { openKpi(t.dataset.kpi); return; }
       if (t.dataset.adv) { advance(t.dataset.adv); return; }
@@ -1021,7 +1339,8 @@
       if (e.target.id === 'lq') { ui.lQ = e.target.value; $('#llist').innerHTML = labList(); return; }
       const card = e.target.closest('[data-calc]');
       if (card) updateCalc(card);
-      if (e.target.id === 'afterIn') e.target.removeAttribute('aria-invalid');
+      if (e.target.id === 'afterIn' || e.target.id === 'recNote') e.target.removeAttribute('aria-invalid');
+      if (e.target.closest && e.target.closest('#entryForm')) { e.target.removeAttribute('aria-invalid'); const m = document.getElementById(`${e.target.id}-err`); if (m) m.hidden = true; }
     });
     document.addEventListener('change', e => {
       const d = e.target.dataset && e.target.dataset.d8;
@@ -1032,6 +1351,7 @@
     });
     document.addEventListener('submit', e => {
       if (e.target.id === 'pwForm') { e.preventDefault(); submitPassword(e.target); }
+      if (e.target.id === 'entryForm') { e.preventDefault(); submitEntry(e.target); }
     });
     document.addEventListener('keydown', e => {
       if (!S.user) return; // signed out: only the login form is active
@@ -1040,7 +1360,7 @@
       if (e.key === 'Escape') { closeOverlays(); return; }
       if (e.key === 'Enter' && e.target.id === 'afterIn') { const b = $('[data-verify]'); if (b) b.click(); return; }
       if (e.key === 'Tab' && $('#drawer').classList.contains('on')) {
-        const f = $$('#drawer button:not([disabled]), #drawer input, #drawer a[href]');
+        const f = $$('#drawer button:not([disabled]), #drawer input:not([disabled]), #drawer select, #drawer textarea, #drawer a[href]');
         if (!f.length) return;
         if (e.shiftKey && document.activeElement === f[0]) { e.preventDefault(); f[f.length - 1].focus(); }
         else if (!e.shiftKey && document.activeElement === f[f.length - 1]) { e.preventDefault(); f[0].focus(); }
@@ -1096,14 +1416,20 @@
   }
   async function loadState() {
     const st = await api('/api/state', { quiet401: true });
-    const first = !S.user;
     applyState(st);
-    let hadPref = false; try { hadPref = !!localStorage.getItem(PREF_KEY); } catch (e) { /* ignore */ }
-    if (first && S.user.plant !== 'all' && !hadPref) { S.plant = S.user.plant; save(); }
+    // Plant-scoped users see only their own plant (the server refuses other plants' measured data).
+    if (S.user.plant !== 'all' && S.plant !== S.user.plant) { S.plant = S.user.plant; save(); }
+    ui.recs = {}; ui.recOpen = null; PALETTE = null; // a different user may have signed in
+    await loadMeasured();
     $('#login').hidden = true; $('#login').innerHTML = '';
     document.body.classList.remove('locked');
     if (!controlsReady) { initControls(); controlsReady = true; }
+    $('#plantSel').innerHTML = D.PLANTS.filter(p => S.user.plant === 'all' || p.id === S.user.plant).map(p => `<option value="${esc(p.id)}">${esc(p.short)}</option>`).join('');
+    $('#plantSel').disabled = S.user.plant !== 'all';
     $('#plantSel').value = S.plant;
+    $('#scanBtn').hidden = !canRead();
+    $('#plantSel').closest('label').hidden = !canRead();
+    $('#periodSel').closest('label').hidden = !canRead();
     renderUserBtn();
     rerender(true);
   }
@@ -1117,10 +1443,15 @@
     if (!S.user) return;
     const u = S.user;
     const scope = u.plant === 'all' ? 'in every plant' : `in ${esc(plantShort(u.plant))} only`;
-    const can = VIEW_ROLES.includes(u.role)
-      ? `Move corrective actions ${scope}${userCanApprove() ? ', including approvals' : ' (approval needs the CEO, Plant Head or Finance)'}.`
-      : 'View dashboards. This account type cannot change corrective actions.';
-    openDrawer(`<h3 id="drawerTitle">${esc(u.displayName)}</h3><p class="lede">${esc(u.username)} · ${esc(roleName(u.role))} · ${esc(u.plant === 'all' ? 'All plants' : plantShort(u.plant))}</p>
+    const dept = u.department && D.SECTIONS[u.department] ? D.SECTIONS[u.department].name : null;
+    const nf = (u.forms || []).length, nr = (u.reviewForms || []).length;
+    const lines = [];
+    if (nf) lines.push(`Enter records on ${nf} form${nf === 1 ? '' : 's'}${dept ? ` for ${esc(dept)}` : ''} ${scope}.`);
+    if (nr) lines.push(`Approve or reject other people's records on those forms ${scope}.`);
+    if (VIEW_ROLES.includes(u.role)) lines.push(`Move corrective actions ${scope}${userCanApprove() ? ', including approvals' : ' (approval needs the CEO, Plant Head or Finance)'}.`);
+    else if (u.canReadDashboards) lines.push('View dashboards. This account type cannot change corrective actions.');
+    const can = lines.join(' ') || 'This account cannot enter records or read dashboards.';
+    openDrawer(`<h3 id="drawerTitle">${esc(u.displayName)}</h3><p class="lede">${esc(u.username)} · ${esc(roleName(u.role))}${dept ? ` · ${esc(dept)}` : ''} · ${esc(u.plant === 'all' ? 'All plants' : plantShort(u.plant))}</p>
       <div class="blk"><b>What you can do</b><p class="small">${can}</p></div>
       <form class="blk" id="pwForm" novalidate><b>Change password</b>
         <label class="f" for="pwOld">Current password</label><input id="pwOld" name="current" type="password" autocomplete="current-password" required maxlength="256">
