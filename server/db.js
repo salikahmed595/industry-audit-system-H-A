@@ -124,6 +124,75 @@ const MIGRATIONS = [
    );
    CREATE INDEX login_throttle_first ON login_throttle(first);
    CREATE TABLE meta (k TEXT PRIMARY KEY, v INTEGER NOT NULL);`,
+  // 5: automation. Scheduled CEO report summaries, in-app alerts for high/medium findings, usage events for the
+  //    usage & cost dashboard, and photographed ledgers/checklists read by local OCR (kept as audit evidence).
+  `CREATE TABLE settings (
+     k TEXT PRIMARY KEY,
+     v TEXT NOT NULL,
+     updated_at TEXT NOT NULL,
+     updated_by INTEGER REFERENCES users(id)
+   );
+   CREATE TABLE reports (
+     id INTEGER PRIMARY KEY,
+     kind TEXT NOT NULL CHECK (kind IN ('scheduled','manual')),
+     schedule TEXT NOT NULL,
+     period_from TEXT NOT NULL,
+     period_to TEXT NOT NULL,
+     created_at TEXT NOT NULL,
+     created_by INTEGER REFERENCES users(id),
+     headline TEXT NOT NULL,
+     summary TEXT NOT NULL,
+     ms INTEGER NOT NULL
+   );
+   CREATE UNIQUE INDEX reports_one_scheduled_per_day ON reports(period_to) WHERE kind = 'scheduled';
+   CREATE TABLE alerts (
+     id INTEGER PRIMARY KEY,
+     dedupe TEXT NOT NULL,
+     kpi TEXT NOT NULL,
+     sec TEXT NOT NULL,
+     plant TEXT NOT NULL,
+     severity TEXT NOT NULL CHECK (severity IN ('high','medium')),
+     status TEXT NOT NULL CHECK (status IN ('open','acknowledged','resolved')),
+     title TEXT NOT NULL,
+     detail TEXT NOT NULL,
+     created_at TEXT NOT NULL,
+     updated_at TEXT NOT NULL,
+     ack_by INTEGER REFERENCES users(id),
+     ack_at TEXT,
+     resolved_at TEXT,
+     version INTEGER NOT NULL DEFAULT 1
+   );
+   CREATE UNIQUE INDEX alerts_one_live ON alerts(dedupe) WHERE status IN ('open','acknowledged');
+   CREATE INDEX alerts_scope ON alerts(status, plant, sec);
+   CREATE TABLE usage_events (
+     id INTEGER PRIMARY KEY,
+     ts TEXT NOT NULL,
+     day TEXT NOT NULL,
+     kind TEXT NOT NULL CHECK (kind IN ('audit_cycle','report','ocr','llm')),
+     ms INTEGER NOT NULL,
+     gather_ms INTEGER NOT NULL DEFAULT 0,
+     compute_ms INTEGER NOT NULL DEFAULT 0,
+     bytes INTEGER NOT NULL DEFAULT 0,
+     cost_usd REAL NOT NULL DEFAULT 0,
+     detail TEXT NOT NULL DEFAULT '{}'
+   );
+   CREATE INDEX usage_by_day ON usage_events(day, kind);
+   CREATE TABLE documents (
+     id INTEGER PRIMARY KEY,
+     uploaded_by INTEGER NOT NULL REFERENCES users(id),
+     uploaded_at TEXT NOT NULL,
+     plant TEXT NOT NULL,
+     form TEXT NOT NULL,
+     mime TEXT NOT NULL CHECK (mime IN ('image/png','image/jpeg','image/webp')),
+     bytes INTEGER NOT NULL,
+     sha256 TEXT NOT NULL,
+     ocr_text TEXT NOT NULL,
+     confidence REAL,
+     ms INTEGER NOT NULL,
+     image BLOB NOT NULL
+   );
+   CREATE INDEX documents_by_uploader ON documents(uploaded_by, id);
+   CREATE TRIGGER documents_no_update BEFORE UPDATE ON documents BEGIN SELECT RAISE(ABORT, 'uploaded documents are evidence and cannot be changed'); END;`,
 ];
 
 // A local file shared with another process (the user CLI, a second dev server) waits up to 5 s for its lock

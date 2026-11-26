@@ -13,7 +13,7 @@
   const DEPARTMENTS = Object.keys(D.SECTIONS); // a department is a dashboard section
   const TEXT_RE = /^[\p{L}\p{N} ._\-/#()&+]{1,40}$/u;
   const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-  const PERIODS = { m: 30, q: 91, y: 365 };
+  const PERIODS = { w: 7, f: 14, m: 30, q: 91, y: 365 }; // w and f: weekly and two-weekly report windows
 
   // ---------- field builders ----------
   const num = (k, label, unit, min, max, o = {}) => ({ k, label, unit, kind: 'num', min, max, req: !!o.req, help: o.help || '' });
@@ -216,7 +216,9 @@
       fields: [num('cotton_pkr_kg', 'Cotton cost', 'PKR/kg', 1, 1e5), num('fabric_pkr_m', 'Fabric cost', 'PKR/m', 1, 1e5),
         num('redye_pkr_lot', 'Cost of one re-dye', 'PKR/lot', 1, 1e8), num('labour_pkr_min', 'Sewing labour cost', 'PKR/min', 0.01, 1e4),
         num('rework_pkr_pc', 'Cost to rework one piece', 'PKR/pc', 0.01, 1e5), num('garment_pkr_pc', 'Cost of one rejected garment', 'PKR/pc', 0.01, 1e5),
-        num('constraint_pkr_h', 'Lost margin per bottleneck hour', 'PKR/h', 1, 1e8)],
+        num('constraint_pkr_h', 'Lost margin per bottleneck hour', 'PKR/h', 1, 1e8),
+        num('machine_pkr_h', 'Lost margin per loom / knitting / repair hour', 'PKR/h', 1, 1e8), num('chem_pkr_kg', 'Dye & chemical cost', 'PKR/kg', 1, 1e6),
+        num('output_kg_h', 'Bottleneck output per hour', 'kg/h', 1, 1e6, { help: 'Production lost for each hour the bottleneck stands still.' })],
     },
   };
   Object.entries(FORMS).forEach(([id, f]) => { f.id = id; f.rules = f.rules || []; f.derive = f.derive || {}; });
@@ -227,7 +229,7 @@
   const KPIS = {};
   const def = (sec, name, d) => { KPIS[`${sec}|${name}`] = { key: `${sec}|${name}`, sec, name, scale: 1, ...d }; };
   const pct = 100;
-  def('spinning', 'Yarn yield', { form: 'spin_shift', t: 'ratio', num: 'yarn_kg', den: 'cotton_kg', scale: pct, impact: { rate: 'cotton_pkr_kg', base: 'cotton_kg' } });
+  def('spinning', 'Yarn yield', { form: 'spin_shift', t: 'ratio', num: 'yarn_kg', den: 'cotton_kg', scale: pct });
   def('spinning', 'Spinning waste', { form: 'spin_shift', t: 'ratio', num: 'waste_total_kg', den: 'cotton_kg', scale: pct });
   def('spinning', 'Blow room loss', { form: 'spin_shift', t: 'ratio', num: 'waste_blowroom_kg', den: 'cotton_kg', scale: pct });
   def('spinning', 'Card waste', { form: 'spin_shift', t: 'ratio', num: 'waste_card_kg', den: 'cotton_kg', scale: pct });
@@ -240,7 +242,7 @@
 
   def('weaving', 'Loom efficiency', { form: 'weave_shift', t: 'ratio', num: 'loom_hours_run', den: 'loom_hours_avail', scale: pct });
   def('weaving', 'Warp breaks', { form: 'weave_shift', t: 'ratio', num: 'warp_breaks', den: 'picks', scale: 1e5 });
-  def('weaving', 'Fabric defect rate', { form: 'fabric_inspection', t: 'ratio', num: 'meters_defective', den: 'meters_inspected', scale: pct, impact: { rate: 'fabric_pkr_m', base: 'meters_inspected' } });
+  def('weaving', 'Fabric defect rate', { form: 'fabric_inspection', t: 'ratio', num: 'meters_defective', den: 'meters_inspected', scale: pct });
   def('weaving', 'Rolls over 4-point limit', { form: 'fabric_inspection', t: 'ratio', num: 'rolls_over_limit', den: 'rolls_inspected', scale: pct });
   def('weaving', 'Mend time per stop', { form: 'weave_shift', t: 'ratio', num: 'mend_min', den: 'stops' });
   def('weaving', 'Knitting machine efficiency', { form: 'weave_shift', t: 'ratio', num: 'knit_hours_run', den: 'knit_hours_avail', scale: pct });
@@ -248,7 +250,7 @@
   def('weaving', 'Usable width', { form: 'fabric_inspection', t: 'avg', v: 'usable_width_in', w: 'meters_inspected' });
 
   def('dyeing', 'Right-first-time dyeing', { form: 'dye_lot', t: 'ratio', num: 'rft', den: '#', scale: pct });
-  def('dyeing', 'Re-dye / strip', { form: 'dye_lot', t: 'ratio', num: 'redyed', den: '#', scale: pct, impact: { rate: 'redye_pkr_lot', base: '#' } });
+  def('dyeing', 'Re-dye / strip', { form: 'dye_lot', t: 'ratio', num: 'redyed', den: '#', scale: pct });
   def('dyeing', 'Lab-to-bulk ΔE pass', { form: 'dye_lot', t: 'ratio', num: 'lab_bulk_pass', den: '#', scale: pct });
   def('dyeing', 'Lab-dip approval cycle', { form: 'dye_lot', t: 'avg', v: 'lab_dip_days' });
   def('dyeing', 'Chemical vs recipe', { form: 'dye_lot', t: 'ratio', num: 'chem_dev_kg', den: 'chem_recipe_kg', scale: pct });
@@ -258,16 +260,16 @@
   def('dyeing', 'Colorfastness failures', { form: 'dye_lot', t: 'ratio', num: 'colorfast_fail', den: '#', scale: pct });
 
   def('cutting', 'Marker efficiency', { form: 'cutting_lay', t: 'avg', v: 'marker_eff_pct', w: 'fabric_issued_m' });
-  def('cutting', 'Fabric utilization', { form: 'cutting_lay', t: 'ratio', num: 'fabric_used_m', den: 'fabric_issued_m', scale: pct, impact: { rate: 'fabric_pkr_m', base: 'fabric_issued_m' } });
+  def('cutting', 'Fabric utilization', { form: 'cutting_lay', t: 'ratio', num: 'fabric_used_m', den: 'fabric_issued_m', scale: pct });
   def('cutting', 'End loss', { form: 'cutting_lay', t: 'ratio', num: 'end_loss_m', den: 'fabric_issued_m', scale: pct });
   def('cutting', 'Fabric per shirt', { form: 'cutting_lay', t: 'ratio', num: 'fabric_issued_m', den: 'garments' });
   def('cutting', 'Average lay height', { form: 'cutting_lay', t: 'avg', v: 'plies' });
   def('cutting', 'Remnants written off', { form: 'cutting_lay', t: 'ratio', num: 'remnant_written_off_m', den: 'remnant_m', scale: pct });
 
-  def('sewing', 'Line efficiency', { form: 'sewing_line_day', t: 'ratio', num: 'earned_min', den: 'avail_min', scale: pct, impact: { rate: 'labour_pkr_min', base: 'avail_min' } });
+  def('sewing', 'Line efficiency', { form: 'sewing_line_day', t: 'ratio', num: 'earned_min', den: 'avail_min', scale: pct });
   def('sewing', 'Inline DHU', { form: 'sewing_line_day', t: 'ratio', num: 'defects', den: 'pcs_checked', scale: pct });
   def('sewing', 'First-pass yield', { form: 'sewing_line_day', t: 'ratio', num: 'first_pass_pcs', den: 'pcs_checked', scale: pct });
-  def('sewing', 'Rework rate', { form: 'sewing_line_day', t: 'ratio', num: 'reworked_pcs', den: 'output_pcs', scale: pct, impact: { rate: 'rework_pkr_pc', base: 'output_pcs' } });
+  def('sewing', 'Rework rate', { form: 'sewing_line_day', t: 'ratio', num: 'reworked_pcs', den: 'output_pcs', scale: pct });
   def('sewing', 'Absenteeism', { form: 'sewing_line_day', t: 'ratio', num: 'absent', den: 'rostered', scale: pct });
   def('sewing', 'Styles with verified SAM', { form: 'sewing_line_day', t: 'share', v: 'sam_verified', by: 'style' });
   def('sewing', 'Cut-to-sew WIP', { form: 'sewing_line_day', t: 'ratio', num: 'wip_pcs', den: 'output_pcs' });
@@ -276,18 +278,18 @@
   def('quality', 'Cost of poor quality', { form: 'finance_month', t: 'ratio', num: 'copq_m', den: 'sales_m', scale: pct });
   def('quality', 'Final AQL failure', { form: 'quality_day', t: 'ratio', num: 'final_failed', den: 'final_inspections', scale: pct });
   def('quality', 'Seconds & downgrades', { form: 'quality_day', t: 'ratio', num: 'seconds_pcs', den: 'pcs_produced', scale: pct });
-  def('quality', 'Reject rate', { form: 'quality_day', t: 'ratio', num: 'rejected_pcs', den: 'pcs_produced', scale: pct, impact: { rate: 'garment_pkr_pc', base: 'pcs_produced' } });
+  def('quality', 'Reject rate', { form: 'quality_day', t: 'ratio', num: 'rejected_pcs', den: 'pcs_produced', scale: pct });
   def('quality', 'Chargebacks', { form: 'finance_month', t: 'ratio', num: 'chargebacks_m', den: 'gross_invoiced_m', scale: pct });
   def('quality', 'Customer claims', { form: 'finance_month', t: 'sum', v: 'claims_m', perDays: 91 });
   def('quality', 'Rolls inspected', { form: 'quality_day', t: 'ratio', num: 'rolls_inspected', den: 'rolls_received', scale: pct });
-  def('quality', 'Scrap rate', { form: 'quality_day', t: 'ratio', num: 'scrap_pcs', den: 'pcs_produced', scale: pct, impact: { rate: 'garment_pkr_pc', base: 'pcs_produced' } });
+  def('quality', 'Scrap rate', { form: 'quality_day', t: 'ratio', num: 'scrap_pcs', den: 'pcs_produced', scale: pct });
 
   def('maintenance', 'PM compliance', { form: 'maintenance_day', t: 'ratio', num: 'pm_done', den: 'pm_planned', scale: pct });
   def('maintenance', 'MTBF — dye jets', { form: 'maintenance_day', t: 'ratio', num: 'jet_run_h', den: 'jet_failures' });
   def('maintenance', 'MTTR', { form: 'maintenance_day', t: 'ratio', num: 'repair_h', den: 'breakdowns' });
   def('maintenance', 'Breakdown share of work', { form: 'maintenance_day', t: 'ratio', num: 'wo_breakdown', den: 'wo_total', scale: pct });
   def('maintenance', 'Spares availability', { form: 'maintenance_day', t: 'ratio', num: 'spares_available', den: 'spares_requested', scale: pct });
-  def('maintenance', 'Unplanned downtime', { form: 'maintenance_day', t: 'sum', v: 'unplanned_downtime_h', perDays: 30, impact: { rate: 'constraint_pkr_h', direct: true } });
+  def('maintenance', 'Unplanned downtime', { form: 'maintenance_day', t: 'sum', v: 'unplanned_downtime_h', perDays: 30 });
   def('maintenance', 'Open work orders', { form: 'maintenance_day', t: 'latest', v: 'open_wo', agg: 'sum' });
 
   def('planning', 'OTIF delivery', { form: 'planning_week', t: 'ratio', num: 'orders_otif', den: 'orders_shipped', scale: pct });
@@ -596,27 +598,205 @@
 
   const appliesTo = (key, plant) => plant === 'all' || META[key].plants.includes(plant);
 
-  /** Measured cost of the gap to target, PKR per 30 days, using finance's cost rates. */
-  function impactFor(kd, meta, recsByPlant, rateFor, win) {
-    if (!kd.impact) return null;
-    let total = 0, any = false;
-    for (const [plant, recs] of recsByPlant) {
-      const rate = rateFor(plant, kd.impact.rate);
-      if (rate === null) continue;
-      const c = compute(kd, recs, win);
-      if (c.value === null) continue;
-      any = true;
-      const gap = meta.dir === 'up' ? meta.target - c.value : c.value - meta.target;
-      if (gap <= 0) continue;
-      if (kd.impact.direct) { total += gap * rate * 30 / kd.perDays; continue; }
-      const form = FORMS[kd.form];
-      const base = sum(c.used.map(r => fieldValue(form, r.data, kd.impact.base) || 0)) * 30 / spanDays(form, c.used, win);
-      total += gap / 100 * base * rate;
+  const fmtN = v => (Math.abs(v) >= 100 ? Math.round(v).toLocaleString('en-US') : String(+v.toFixed(Math.abs(v) >= 10 ? 1 : 2)));
+  const fmtPkr = n => TA.fmt.pkr(n);
+  const LB_PER_KG = 2.20462;
+
+  // ---------- quantified impact: what a gap to target costs, in the units a manager thinks in ----------
+  // Every figure is per 30 days, from approved records plus finance's cost rates (Cost rates form).
+  //   share:  gap in percentage points × volume per 30 days      3 points × 30,000 kg cotton = 900 kg
+  //   per:    gap per unit × units per 30 days                    2 min extra per stop × 400 stops = 800 min
+  //   direct: the KPI already is an amount per period             300 h downtime − 200 h target = 100 h
+  //   days:   days of money tied up × amount per day = cash tied up; PKR = its financing cost
+  // rate: cost per unit of the quantity. out: production per hour (kg/h). money: the quantity is PKR millions.
+  // overlap: KPIs that measure the same loss from different angles; totals count each group once (the largest).
+  // Industry-neutral: another industry's audit brings its own forms, KPIs and entries in this table.
+  const QUANT = {};
+  const qd = (key, spec) => { QUANT[key] = spec; };
+  const spinLoss = what => ({ mode: 'share', base: 'cotton_kg', unit: 'kg', what, rate: 'cotton_pkr_kg', overlap: 'spin-loss' });
+  qd('spinning|Yarn yield', spinLoss('cotton not turned into yarn'));
+  qd('spinning|Spinning waste', spinLoss('extra cotton waste'));
+  qd('spinning|Blow room loss', spinLoss('extra blow-room loss'));
+  qd('spinning|Card waste', spinLoss('extra card waste'));
+  qd('spinning|Comber noil', { ...spinLoss('extra comber noil'), base: 'comber_feed_kg' });
+  qd('weaving|Loom efficiency', { mode: 'share', base: 'loom_hours_avail', unit: 'h', what: 'loom hours lost', rate: 'machine_pkr_h' });
+  qd('weaving|Knitting machine efficiency', { mode: 'share', base: 'knit_hours_avail', unit: 'h', what: 'knitting machine hours lost', rate: 'machine_pkr_h' });
+  qd('weaving|Mend time per stop', { mode: 'per', base: 'stops', unit: 'min', what: 'extra loom time spent mending', rate: 'machine_pkr_h' });
+  qd('weaving|Fabric defect rate', { mode: 'share', base: 'meters_inspected', unit: 'm', what: 'extra defective fabric', rate: 'fabric_pkr_m' });
+  qd('dyeing|Right-first-time dyeing', { mode: 'share', base: '#', unit: 'lots', what: 'extra lots not right first time', rate: 'redye_pkr_lot', overlap: 'redye' });
+  qd('dyeing|Re-dye / strip', { mode: 'share', base: '#', unit: 'lots', what: 'extra lots re-dyed or stripped', rate: 'redye_pkr_lot', overlap: 'redye' });
+  qd('dyeing|Chemical vs recipe', { mode: 'share', base: 'chem_recipe_kg', unit: 'kg', what: 'chemicals used off recipe', rate: 'chem_pkr_kg' });
+  qd('dyeing|Water use', { mode: 'per', base: 'lot_kg', unit: 'L', what: 'extra water' });
+  const cutLoss = (what, base = 'fabric_issued_m') => ({ mode: 'share', base, unit: 'm', what, rate: 'fabric_pkr_m', overlap: 'cut-fabric' });
+  qd('cutting|Fabric utilization', cutLoss('fabric issued but not used'));
+  qd('cutting|Marker efficiency', cutLoss('fabric lost to the marker layout'));
+  qd('cutting|End loss', cutLoss('extra end loss'));
+  qd('cutting|Remnants written off', cutLoss('extra remnants written off', 'remnant_m'));
+  qd('sewing|Line efficiency', { mode: 'share', base: 'avail_min', unit: 'min', what: 'sewing minutes lost', rate: 'labour_pkr_min' });
+  qd('sewing|Rework rate', { mode: 'share', base: 'output_pcs', unit: 'pcs', what: 'extra pieces reworked', rate: 'rework_pkr_pc', overlap: 'rework' });
+  qd('sewing|Inline DHU', { mode: 'share', base: 'pcs_checked', unit: 'defects', what: 'extra defects found', rate: 'rework_pkr_pc', overlap: 'rework' });
+  qd('sewing|First-pass yield', { mode: 'share', base: 'pcs_checked', unit: 'pcs', what: 'extra pieces failing first pass', rate: 'rework_pkr_pc', overlap: 'rework' });
+  qd('sewing|Absenteeism', { mode: 'share', base: 'rostered', unit: 'worker-days', what: 'extra worker-days absent' });
+  qd('quality|Reject rate', { mode: 'share', base: 'pcs_produced', unit: 'pcs', what: 'extra garments rejected', rate: 'garment_pkr_pc', overlap: 'reject' });
+  qd('quality|Scrap rate', { mode: 'share', base: 'pcs_produced', unit: 'pcs', what: 'extra garments scrapped', rate: 'garment_pkr_pc', overlap: 'reject' });
+  qd('quality|Seconds & downgrades', { mode: 'share', base: 'pcs_produced', unit: 'pcs', what: 'extra seconds and downgrades' });
+  qd('quality|Final AQL failure', { mode: 'share', base: 'final_inspections', unit: 'inspections', what: 'extra failed final inspections' });
+  qd('quality|Cost of poor quality', { mode: 'share', base: 'sales_m', money: true, what: 'cost of poor quality above target' });
+  qd('quality|Chargebacks', { mode: 'share', base: 'gross_invoiced_m', money: true, what: 'chargebacks above target' });
+  qd('quality|Customer claims', { mode: 'direct', money: true, what: 'claims above target' });
+  qd('maintenance|Unplanned downtime', { mode: 'direct', unit: 'h', what: 'unplanned downtime above target', rate: 'constraint_pkr_h', out: 'output_kg_h' });
+  qd('maintenance|MTTR', { mode: 'per', base: 'breakdowns', unit: 'h', what: 'extra repair hours', rate: 'machine_pkr_h' });
+  qd('planning|OEE (plant)', { mode: 'share', base: 'planned_min', unit: 'min', what: 'planned time lost to OEE losses', rate: 'constraint_pkr_h', out: 'output_kg_h' });
+  qd('planning|Avg changeover', { mode: 'per', base: 'changeovers', unit: 'min', what: 'extra changeover time', rate: 'constraint_pkr_h', out: 'output_kg_h' });
+  qd('planning|OTIF delivery', { mode: 'share', base: 'orders_shipped', unit: 'orders', what: 'extra orders late or short' });
+  qd('planning|Schedule adherence', { mode: 'share', base: 'plan_items', unit: 'plan items', what: 'extra plan items late' });
+  qd('planning|Expedite cost', { mode: 'direct', money: true, what: 'expediting above target' });
+  qd('inventory|Obsolete write-off', { mode: 'direct', money: true, what: 'write-offs above target' });
+  qd('inventory|Days inventory (DIO)', { mode: 'days', base: 'cogs_month_m', what: 'cash tied up in extra inventory' });
+  qd('procurement|Supplier OTIF', { mode: 'share', base: '#', unit: 'POs', what: 'extra POs late or short' });
+  qd('procurement|Incoming rejection', { mode: 'share', base: 'qty_received', unit: 'units', what: 'extra units rejected' });
+  qd('procurement|Purchase-price variance', { mode: 'direct', money: true, what: 'price paid above standard' });
+  qd('finance|Gross margin', { mode: 'share', base: 'sales_m', money: true, what: 'margin below target' });
+  qd('finance|Std vs actual cost variance', { mode: 'direct', money: true, what: 'cost above standard' });
+  qd('finance|DSO', { mode: 'days', base: 'sales_m', what: 'cash tied up in extra receivables' });
+  qd('finance|DPO', { mode: 'days', base: 'purchases_m', what: 'supplier credit not used' });
+  qd('finance|Discount / credit leakage', { mode: 'share', base: 'gross_invoiced_m', money: true, what: 'discounts above target' });
+
+  const RATE_UNIT = { machine_pkr_h: 'h', constraint_pkr_h: 'h', labour_pkr_min: 'min' };
+  const isPctUnit = u => typeof u === 'string' && u.startsWith('%');
+  const unitTxt = u => (!u ? '' : isPctUnit(u) ? u : ` ${u}`);
+  const fieldOf = (form, k) => form.fields.find(f => f.k === k);
+  const DERIVED_WORDS = { avail_min: 'available sewing minutes', worker_h: 'worker hours', earned_min: 'earned minutes', oee_num_min: 'OEE-good minutes' };
+  const baseWords = (form, k) => {
+    if (k === '#') return { label: 'records', unit: '' };
+    if (DERIVED_WORDS[k]) return { label: DERIVED_WORDS[k], unit: '' };
+    const f = fieldOf(form, k) || { label: k.replace(/_/g, ' '), unit: '' };
+    const unit = f.unit && f.unit !== 'count' && !String(f.unit).startsWith('PKR') ? f.unit : '';
+    return { label: f.label.charAt(0).toLowerCase() + f.label.slice(1), unit };
+  };
+
+  /**
+   * What the gap to target means per 30 days: the quantity lost (kg, m, pcs, h …), hours, kg and lb of production,
+   * PKR at risk (or cash tied up and its financing cost), and the calculation written out step by step.
+   * value: the KPI over the whole scope. Returns null when the KPI meets its target.
+   */
+  function quantify(kd, meta, recsByPlant, rateFor, win, value) {
+    if (value === null || value === undefined) return null;
+    const gapOf = v => (meta.dir === 'up' ? meta.target - v : v - meta.target);
+    const gapAll = gapOf(value);
+    if (!(gapAll > 0)) return null;
+    const u = unitTxt(meta.unit);
+    const gapWords = g => (isPctUnit(meta.unit) ? `${fmtN(g)} percentage points` : `${fmtN(g)}${u}`);
+    const side = meta.dir === 'up' ? 'below' : 'above';
+    const spec = kd.t === 'combo' ? null : QUANT[kd.key];
+    const out = { gap: +gapAll.toFixed(4), gapUnit: isPctUnit(meta.unit) ? 'points' : meta.unit, qty: null, hours: null, kg: null, lb: null,
+      pkr: null, cash: null, pkrWhat: null, missing: [], overlap: spec ? spec.overlap || null : null, steps: [] };
+    out.steps.push(`${meta.name} is ${fmtN(value)}${u} against a target of ${fmtN(meta.target)}${u}: ${gapWords(gapAll)} ${side} target.`);
+    if (!spec) {
+      out.steps.push('The records hold no volume or cost basis for this KPI, so it is shown as a gap only.');
+      return out;
     }
-    return any ? Math.round(total) : null;
+    const form = FORMS[kd.form];
+    const plants = [...recsByPlant.keys()].sort();
+    const many = plants.length > 1;
+    const missing = new Set();
+    let qty = 0, hours = 0, kg = 0, pkr = 0, cash = 0, anyQty = false, anyPkr = false, anyKg = false, anyHours = false;
+    for (const plant of plants) {
+      const c = compute(kd, recsByPlant.get(plant), win);
+      if (c.value === null) continue;
+      const p = many ? `${plant}: ` : '';
+      const gap = gapOf(c.value);
+      if (!(gap > 0)) { if (many) out.steps.push(`${p}on target (${fmtN(c.value)}${u}), nothing lost.`); continue; }
+      let base30 = null, baseTxt = '', bw = null;
+      if (spec.mode !== 'direct') {
+        base30 = sum(c.used.map(r => fieldValue(form, r.data, spec.base) || 0)) * 30 / spanDays(form, c.used, win);
+        bw = baseWords(form, spec.base);
+        baseTxt = spec.money || spec.mode === 'days' ? `PKR ${fmtN(base30)} M ${bw.label} per 30 days` : `${fmtN(base30)}${bw.unit ? ` ${bw.unit}` : ''} ${bw.label} per 30 days`;
+      }
+      if (spec.mode === 'days') {
+        const daily = base30 / 30 * 1e6;
+        const tied = gap * daily;
+        const fin = tied * D.FINANCING_RATE * 30 / 365;
+        cash += tied; pkr += fin; anyPkr = true;
+        out.steps.push(`${p}${fmtN(gap)} days × ${fmtPkr(daily)} a day (${baseTxt}) = ${fmtPkr(tied)} ${spec.what}. Financing it at ${Math.round(D.FINANCING_RATE * 100)}% a year costs ${fmtPkr(fin)} per 30 days.`);
+        continue;
+      }
+      const g = gapWords(gap);
+      const parts = [];
+      let q;
+      if (spec.mode === 'share') { q = gap / 100 * base30; parts.push(`${g} × ${baseTxt}`); }
+      else if (spec.mode === 'per') { q = gap * base30; parts.push(`${g} × ${baseTxt}`); }
+      else {
+        const per = kd.perDays || 30;
+        q = gap * 30 / per;
+        if (per !== 30) parts.push(`${g} ${side} target, × 30 ÷ ${per} days`);
+        else if (spec.money) parts.push(`${g} ${side} target`);
+      }
+      if (spec.money) {
+        const v = q * 1e6;
+        pkr += v; anyPkr = true;
+        parts.push(`= ${fmtPkr(v)} ${spec.what}`);
+        out.steps.push(`${p}${parts.join(' ')}.`);
+        continue;
+      }
+      qty += q; anyQty = true;
+      parts.push(`${parts.length ? '= ' : ''}${fmtN(q)} ${spec.unit} ${spec.what}`);
+      const h = spec.unit === 'h' ? q : spec.unit === 'min' ? q / 60 : null;
+      if (h !== null) { hours += h; anyHours = true; if (spec.unit === 'min') parts.push(`(${fmtN(h)} h)`); }
+      if (spec.unit === 'kg') { kg += q; anyKg = true; parts.push(`(${fmtN(q * LB_PER_KG)} lb)`); }
+      const tail = [];
+      if (spec.out && h !== null) {
+        const o = rateFor(plant, spec.out);
+        if (o === null) missing.add(fieldOf(FORMS.cost_rates, spec.out).label);
+        else { kg += h * o; anyKg = true; tail.push(`${fmtN(h)} h × ${fmtN(o)} kg/h = ${fmtN(h * o)} kg (${fmtN(h * o * LB_PER_KG)} lb) of production lost`); }
+      }
+      if (spec.rate) {
+        const r = rateFor(plant, spec.rate);
+        const rf = fieldOf(FORMS.cost_rates, spec.rate);
+        if (r === null) missing.add(rf.label);
+        else {
+          const ru = RATE_UNIT[spec.rate];
+          const amount = ru === 'h' ? h : ru === 'min' ? (spec.unit === 'h' ? q * 60 : q) : q;
+          const v = amount * r;
+          pkr += v; anyPkr = true;
+          const amountTxt = ru === 'h' && spec.unit === 'min' ? `${fmtN(h)} h` : `${fmtN(amount)} ${ru || spec.unit}`;
+          tail.push(`${amountTxt} × ${fmtPkr(r)}/${rf.unit.replace('PKR/', '')} (${rf.label.toLowerCase()}) = ${fmtPkr(v)}`);
+        }
+      }
+      out.steps.push(`${p}${parts.join(' ')}${tail.length ? `; ${tail.join('; ')}` : ''}.`);
+    }
+    if (anyQty) out.qty = { value: +qty.toFixed(2), unit: spec.unit, what: spec.what };
+    if (anyHours) out.hours = +hours.toFixed(2);
+    if (anyKg) { out.kg = +kg.toFixed(2); out.lb = +(kg * LB_PER_KG).toFixed(2); }
+    if (anyPkr) out.pkr = Math.round(pkr);
+    if (spec.mode === 'days') { out.cash = Math.round(cash); out.pkrWhat = 'financing cost per 30 days'; } else out.pkrWhat = 'per 30 days';
+    out.missing = [...missing];
+    if (many && (anyQty || anyPkr)) {
+      const tot = [anyQty ? `${fmtN(qty)} ${spec.unit}` : '', anyKg && spec.unit !== 'kg' ? `${fmtN(kg)} kg` : '', anyPkr ? fmtPkr(pkr) : ''].filter(Boolean).join(', ');
+      out.steps.push(`All plants: ${tot}${spec.mode === 'days' ? ` financing, on ${fmtPkr(cash)} cash tied up` : ''}.`);
+    }
+    if (out.missing.length) out.steps.push(`Not ${anyPkr ? 'fully ' : ''}in PKR yet: finance has not entered ${out.missing.join(' and ')} on the Cost rates form.`);
+    return out;
   }
 
-  const fmtN = v => (Math.abs(v) >= 100 ? Math.round(v).toLocaleString('en-US') : +v.toFixed(Math.abs(v) >= 10 ? 1 : 2));
+  /** Totals across findings, counting each overlap group once (its largest member). */
+  function totalsOf(findings) {
+    const best = new Map();
+    for (const f of findings) {
+      const q = f.quant;
+      if (!q) continue;
+      const k = q.overlap || f.key;
+      const cur = best.get(k);
+      if (!cur || (q.pkr || 0) > (cur.pkr || 0) || ((q.pkr || 0) === (cur.pkr || 0) && (q.kg || 0) > (cur.kg || 0))) best.set(k, q);
+    }
+    const t = { pkr: 0, hours: 0, kg: 0, cash: 0, quantified: 0 };
+    for (const q of best.values()) {
+      t.pkr += q.pkr || 0; t.hours += q.hours || 0; t.kg += q.kg || 0; t.cash += q.cash || 0;
+      if (q.pkr !== null || q.qty) t.quantified++;
+    }
+    t.pkr = Math.round(t.pkr); t.cash = Math.round(t.cash); t.hours = +t.hours.toFixed(1); t.kg = +t.kg.toFixed(1); t.lb = +(t.kg * LB_PER_KG).toFixed(1);
+    return t;
+  }
 
   /**
    * The dashboard's ground truth. records: APPROVED records [{id, type, plant, date, data}].
@@ -651,8 +831,10 @@
         value: c.value === null ? null : +c.value.toFixed(4), n: c.n, first: c.first, last: c.last, stale,
         status: c.value === null ? 'unknown' : TA.RCA.status(c.value, meta.target, meta.dir),
         form: kd.form, formLabel: form.label, formula: describe(kd), series: series.slice(-60),
-        impactPkr: impactFor(kd, meta, byPlant, rateFor, win), _used: c.used,
+        _used: c.used,
       };
+      kpis[key].quant = quantify(kd, meta, byPlant, rateFor, win, c.value);
+      kpis[key].impactPkr = kpis[key].quant ? kpis[key].quant.pkr : null;
     }
     for (const key of keys.filter(k => KPIS[k].t === 'combo')) {
       const kd = KPIS[key], meta = META[key];
@@ -664,8 +846,10 @@
         key, sec: kd.sec, name: kd.name, unit: meta.unit, target: meta.target, dir: meta.dir, applicable: appliesTo(key, plant),
         value: value === null ? null : +value.toFixed(4), n: ok ? Math.min(...parts.map(([p]) => p.n)) : 0, first: null, last: ok ? lasts[0] : null,
         stale: ok && parts.some(([p]) => p.stale), status: value === null ? 'unknown' : TA.RCA.status(value, meta.target, meta.dir),
-        form: null, formLabel: [...new Set(parts.map(([p]) => p.formLabel))].join(' + '), formula: describe(kd), series: [], impactPkr: null, _used: [],
+        form: null, formLabel: [...new Set(parts.map(([p]) => p.formLabel))].join(' + '), formula: describe(kd), series: [], _used: [],
       };
+      kpis[key].quant = quantify(kd, meta, new Map(), rateFor, win, value);
+      kpis[key].impactPkr = null;
     }
 
     // coverage
@@ -686,11 +870,11 @@
       const x = kpis[k];
       if (x.value === null || !x.applicable || x.status === 'good') continue;
       const gapPct = Math.abs(x.value - x.target) / (Math.abs(x.target) || 1) * 100;
-      findings.push({ key: k, sec: x.sec, name: x.name, value: x.value, target: x.target, unit: x.unit, dir: x.dir, status: x.status, n: x.n, gapPct: +gapPct.toFixed(1), impactPkr: x.impactPkr, evidence: evidence(KPIS[k], x, byForm, win), hypotheses: hypotheses(k) });
+      findings.push({ key: k, sec: x.sec, name: x.name, value: x.value, target: x.target, unit: x.unit, dir: x.dir, status: x.status, n: x.n, gapPct: +gapPct.toFixed(1), impactPkr: x.impactPkr, quant: x.quant, evidence: evidence(KPIS[k], x, byForm, win), hypotheses: hypotheses(k) });
     }
     findings.sort((a, b) => ((b.impactPkr || 0) - (a.impactPkr || 0)) || ((b.status === 'bad') - (a.status === 'bad')) || (b.gapPct - a.gapPct));
     for (const k of keys) delete kpis[k]._used;
-    return { plant, period: win, source: 'approved department records', kpis, coverage, findings };
+    return { plant, period: win, source: 'approved department records', kpis, coverage, findings, totals: totalsOf(findings) };
   }
 
   function evidence(kd, x, byForm, win) {
@@ -727,7 +911,7 @@
         ev.push({ kind: 'pareto', items: p.slice(0, 6).map(i => ({ label: i.label, value: i.value, share: +i.share.toFixed(1) })), text: `Pareto of ${recs.length} ${FORMS[pc.form].label.toLowerCase()} records: ${top.map(i => `${i.label} ${Math.round(i.share)}%`).join(', ')} (${Math.round(top[top.length - 1].cum)}% of ${pc.unit}).` });
       }
     }
-    if (x.impactPkr) ev.push({ kind: 'impact', text: `Measured cost of the gap: PKR ${Math.round(x.impactPkr).toLocaleString('en-US')} per 30 days, at finance's cost rate.` });
+    if (x.impactPkr) ev.push({ kind: 'impact', text: `Measured cost of the gap: ${fmtPkr(x.impactPkr)} ${x.quant.pkrWhat}, at finance's cost rates (see how it was calculated).` });
     return ev;
   }
 
@@ -780,7 +964,7 @@
   const formForKpi = key => (KPIS[key] && KPIS[key].form ? FORMS[KPIS[key].form] : null);
 
   const api = {
-    FORMS, KPIS, META, PLANT_IDS, DEPARTMENTS, PERIODS, PARETO, FINDING_KPI, validateRecord, measureAll, compute, describe, windowFor, periodStart,
+    FORMS, KPIS, META, QUANT, PLANT_IDS, DEPARTMENTS, PERIODS, PARETO, FINDING_KPI, validateRecord, measureAll, quantify, totalsOf, compute, describe, windowFor, periodStart,
     formsFor, reviewableForms, formForKpi, outlierFlags,
     stats: { mean, variance, median, welch, tPValue, controlChart, trend, pareto }, dates: { addDays, daysBetween, validDate },
   };

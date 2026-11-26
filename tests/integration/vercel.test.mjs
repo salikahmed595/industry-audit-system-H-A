@@ -13,7 +13,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const { loadConfig } = require('../../server/config.js');
-const ENV_KEYS = ['NODE_ENV', 'DB_URL', 'DB_AUTH_TOKEN', 'TURSO_DATABASE_URL', 'TURSO_AUTH_TOKEN', 'VERCEL_ENV', 'VERCEL_PROJECT_PRODUCTION_URL', 'DB_PATH', 'VERCEL', 'PUBLIC_ORIGIN', 'TRUST_PROXY', 'SECURE_COOKIES'];
+const ENV_KEYS = ['NODE_ENV', 'DB_URL', 'DB_AUTH_TOKEN', 'TURSO_DATABASE_URL', 'TURSO_AUTH_TOKEN', 'VERCEL_ENV', 'VERCEL_PROJECT_PRODUCTION_URL', 'DB_PATH', 'VERCEL', 'PUBLIC_ORIGIN', 'TRUST_PROXY', 'SECURE_COOKIES', 'CRON_SECRET'];
 
 function freshEntry(env) {
   const saved = Object.fromEntries(ENV_KEYS.map(k => [k, process.env[k]]));
@@ -119,6 +119,19 @@ describe('static build for Vercel (scripts/build-static.js)', () => {
   });
 });
 
+describe('vercel.json automation settings', () => {
+  const v = JSON.parse(fs.readFileSync(path.join(ROOT, 'vercel.json'), 'utf8'));
+  it('runs the daily job once a day through Vercel Cron', () => {
+    assert.ok(Array.isArray(v.crons) && v.crons.some(c => c.path === '/api/cron/daily' && /^\S+ \S+ \* \* \*$/.test(c.schedule)));
+  });
+  it('gives the API function time for OCR and ships the local OCR model with it', () => {
+    const f = v.functions && v.functions['api/index.js'];
+    assert.ok(f && f.maxDuration >= 30 && f.maxDuration <= 60);
+    assert.match(f.includeFiles, /@tesseract\.js-data\/eng/);
+    assert.match(f.includeFiles, /tesseract\.js-core/);
+  });
+});
+
 describe('DB_URL validation', () => {
   const env = { DB_AUTH_TOKEN: 'token' };
   it('accepts a bare Turso host, with or without a port', () => {
@@ -146,6 +159,11 @@ describe('DB_URL validation', () => {
     assert.deepEqual([own.publicOrigin, own.trustProxy], ['https://audit.example.com', false]);
     // Off Vercel nothing is assumed.
     assert.throws(() => loadConfig({ NODE_ENV: 'production', PUBLIC_ORIGIN: 'https://audit.example.com' }), /TRUST_PROXY/);
+  });
+  it('CRON_SECRET switches the daily job on; a short secret is refused', () => {
+    assert.equal(loadConfig({}).cronSecret, null);
+    assert.equal(loadConfig({ CRON_SECRET: 'a'.repeat(32) }).cronSecret, 'a'.repeat(32));
+    assert.throws(() => loadConfig({ CRON_SECRET: 'short' }), /CRON_SECRET/);
   });
   it('rejects anything with credentials, a query, a path or odd characters', () => {
     for (const bad of ['libsql://user:pw@audit.turso.io', 'libsql://audit.turso.io?authToken=x', 'libsql://audit.turso.io/db', 'libsql://audit_turso.io#x', 'http://audit.turso.io', 'file:/etc/passwd']) {

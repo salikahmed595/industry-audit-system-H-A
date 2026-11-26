@@ -618,3 +618,40 @@ ul.evid li.sig b { color: var(--bad); }
 
 /* the hidden attribute always wins over component display rules */
 [hidden] { display: none !important; }
+
+/* Quantified impact on finding cards: chips plus the calculation behind every number. */
+.qchips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 0; }
+.qc { display: inline-flex; flex-direction: column; padding: 5px 9px; border-radius: 10px; background: var(--glass-2); border: 1px solid var(--stroke); line-height: 1.25; }
+.qc span { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.qc b { font-size: 13px; color: var(--text); font-weight: 600; }
+details.how { margin-top: 10px; font-size: 13px; }
+details.how summary { cursor: pointer; color: var(--accent); font-weight: 600; }
+details.how summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+details.how ol { margin: 6px 0 0; padding-left: 20px; color: var(--muted); }
+details.how li { margin: 4px 0; }
+
+/* Alerts, CEO reports, usage & costs, OCR */
+.alert-high { border-left: 3px solid var(--bad); }
+.alert-medium { border-left: 3px solid var(--warn); }
+.phead .acts label.f.inline { margin: 0; align-self: center; }
+.ef-photo { align-items: center; margin-bottom: 10px; }
+.ef-ocr { margin: 0 0 12px; padding: 10px 12px; border-radius: 12px; background: var(--glass-2); border: 1px solid var(--stroke); font-size: 13px; }
+.ef-ocr ul { margin: 6px 0 0; padding-left: 18px; }
+.ef-ocr svg { width: 15px; height: 15px; vertical-align: -3px; }
+.entry .ocr-filled { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+pre.ocr-text { white-space: pre-wrap; font-size: 12px; max-height: 240px; overflow: auto; margin: 6px 0 0; padding: 8px; border-radius: 8px; background: var(--glass-2); }
+.report .tw td details.how { margin-top: 4px; }
+.daybars { margin: 0; }
+.daybars figcaption { font-size: 13px; margin-bottom: 8px; display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.daybars svg { width: 100%; height: 120px; display: block; }
+.daybars .ax-row { display: flex; justify-content: space-between; margin-top: 4px; font-size: 11px; }
+.daybars .dbar { fill: var(--accent); }
+.daybars .hit { fill: transparent; }
+.daybars g:hover .dbar { fill: var(--text); }
+.daybars .grid { stroke: var(--stroke); stroke-dasharray: 3 3; }
+.daybars .base { stroke: var(--muted); stroke-opacity: .5; }
+.ucat { margin: 10px 0; }
+@media print {
+  .report .btn, .phead .acts, .hint { display: none !important; }
+  .report details.how { display: block; }
+}

@@ -5,6 +5,7 @@
  * lives in memory: sessions, sign-in throttling and the measured-cache version are all in the database. */
 const http = require('node:http');
 const net = require('node:net');
+const crypto = require('node:crypto');
 const { openDb } = require('./db');
 const audit = require('./audit');
 const { makeUsers, ValidationError } = require('./users');
@@ -12,18 +13,24 @@ const { makeActions } = require('./actions');
 const { makeKpis } = require('./kpis');
 const { makeRecords } = require('./records');
 const { makeMeasured } = require('./measured');
+const { makeUsage } = require('./usage');
+const { makeAlerts } = require('./alerts');
+const { makeReports } = require('./reports');
+const { makeOcr } = require('./ocr');
 const M = require('../js/measure.js');
 const { HttpError } = require('./errors');
 const sec = require('./security');
 const { securityHeaders, sendJson, readJson, buildStaticMap, serveStatic, parseCookies } = require('./http');
 
-const DEFAULTS = { dbPath: ':memory:', dbAuthToken: null, secureCookies: false, publicOrigin: null, trustProxy: false, sessionTtlHours: 12, loginMaxFailures: 5, serveStatic: true };
+const DEFAULTS = { dbPath: ':memory:', dbAuthToken: null, cronSecret: null, secureCookies: false, publicOrigin: null, trustProxy: false, sessionTtlHours: 12, loginMaxFailures: 5, serveStatic: true };
 const LOCK_WINDOW_MS = 15 * 60e3;
 const IP_MAX_FAILURES = 50;
 const THROTTLE_PURGE_CHANCE = 0.05; // about one sign-in attempt in 20 also deletes expired throttle rows
 const AUDIT_VIEWERS = ['ceo', 'finance', 'admin'];
 const INGESTERS = ['integration', 'admin'];
 const DASHBOARD_READERS = ['ceo', 'plant', 'dept', 'finance', 'admin']; // operators and feeds only enter data
+const REPORT_READERS = AUDIT_VIEWERS; // the CEO report summary and the usage & cost dashboard
+const REPORT_ADMINS = ['ceo', 'admin']; // may change the report schedule or generate one now
 
 async function createApp(options = {}) {
   const cfg = { ...DEFAULTS, ...options };
@@ -34,7 +41,33 @@ async function createApp(options = {}) {
   const actions = makeActions(db, clock);
   const kpis = makeKpis(db, clock);
   const records = makeRecords(db, clock);
-  const measured = makeMeasured(records, clock);
+  const usage = makeUsage(db, clock);
+  const measured = makeMeasured(records, clock, {
+    onCycle: c => usage.log('audit_cycle', { ms: c.ms, gatherMs: c.gatherMs, computeMs: c.computeMs, detail: { trigger: 'dashboard', plant: c.plant, period: c.period, records: c.records } }),
+  });
+  const alerts = makeAlerts(db, clock, { records, usage });
+  const reports = makeReports(db, clock, { records, actions, alerts, usage });
+  const ocr = makeOcr(db, clock, { usage });
+
+  /** The daily job (Vercel Cron, npm run cron, or any scheduler): alert sweep, the report if one is due, housekeeping. */
+  async function runDaily() {
+    const sweep = await alerts.sweep({ force: true });
+    const report = await reports.runDue();
+    const pruned = await usage.prune();
+    return { ok: true, alerts: sweep, report: report ? { id: report.id, from: report.from, to: report.to, headline: report.headline } : null, pruned };
+  }
+  /** Work that is due anyway, done when someone opens the dashboard: a missed cron run never loses an alert or report. */
+  async function catchUp(user) {
+    try {
+      await alerts.sweep();
+      if (REPORT_READERS.includes(user.role)) await reports.runDue();
+    } catch (e) { console.error(`[${iso()}] catch-up failed:`, e); }
+  }
+  const cronOk = req => {
+    const m = /^Bearer (.{1,512})$/.exec(String(req.headers.authorization || ''));
+    // Both sides hashed to the same length, then compared in constant time.
+    return !!m && crypto.timingSafeEqual(Buffer.from(sec.sha256(m[1])), Buffer.from(sec.sha256(cfg.cronSecret)));
+  };
   await actions.seedIfEmpty();
   const statics = cfg.serveStatic ? buildStaticMap() : new Map();
   const cookieName = cfg.secureCookies ? '__Host-ta_sid' : 'ta_sid';
@@ -150,6 +183,12 @@ async function createApp(options = {}) {
       return sendJson(res, 200, { user: users.pub(row) });
     }
 
+    if (pathname === '/api/cron/daily' && (m === 'GET' || m === 'POST')) {
+      if (!cfg.cronSecret) throw new HttpError(503, 'Scheduled jobs are not configured on this server (set CRON_SECRET).');
+      if (!cronOk(req)) throw new HttpError(401, 'Wrong or missing cron secret.');
+      return sendJson(res, 200, await runDaily());
+    }
+
     if (m === 'POST' && pathname === '/api/logout') {
       const u = await sessionUser(req);
       if (u) {
@@ -192,8 +231,9 @@ async function createApp(options = {}) {
 
     if (m === 'GET' && pathname === '/api/state') {
       const reader = DASHBOARD_READERS.includes(user.role);
-      const [meOut, acts, log, kpiList] = await Promise.all([me(), reader ? actions.all() : {}, logFor(user), reader ? kpis.latest() : []]);
-      return sendJson(res, 200, { user: meOut, actions: reader ? acts : [], log, kpis: kpiList, serverTime: iso() });
+      if (reader) await catchUp(user);
+      const [meOut, acts, log, kpiList, alertCounts] = await Promise.all([me(), reader ? actions.all() : {}, logFor(user), reader ? kpis.latest() : [], reader ? alerts.counts(user) : null]);
+      return sendJson(res, 200, { user: meOut, actions: reader ? acts : [], log, kpis: kpiList, alerts: alertCounts, serverTime: iso() });
     }
 
     const am = pathname.match(/^\/api\/actions\/(F\d{2,3})\/(transition|reopen|d8)$/);
@@ -223,6 +263,51 @@ async function createApp(options = {}) {
     if (m === 'GET' && pathname === '/api/measured') {
       requireRole(user, DASHBOARD_READERS);
       return sendJson(res, 200, await measured.get(query, user));
+    }
+
+    // ---- alerts (in-app), CEO report summaries, usage & costs, OCR ----
+    if (m === 'GET' && pathname === '/api/alerts') {
+      requireRole(user, DASHBOARD_READERS);
+      await alerts.sweep();
+      const status = query.get('status') === 'all' ? 'all' : 'open';
+      return sendJson(res, 200, { alerts: await alerts.list(user, { status }), counts: await alerts.counts(user) });
+    }
+    const alm = pathname.match(/^\/api\/alerts\/(\d{1,12})\/ack$/);
+    if (m === 'POST' && alm) {
+      requireRole(user, DASHBOARD_READERS);
+      return sendJson(res, 200, { alert: await alerts.acknowledge(user, Number(alm[1])) });
+    }
+    if (m === 'GET' && pathname === '/api/reports') {
+      requireRole(user, REPORT_READERS);
+      await reports.runDue();
+      return sendJson(res, 200, { reports: await reports.list(), schedule: await reports.schedule(), nextDue: await reports.nextDue(), canManage: REPORT_ADMINS.includes(user.role) });
+    }
+    if (m === 'POST' && pathname === '/api/reports') {
+      requireRole(user, REPORT_ADMINS);
+      return sendJson(res, 201, { report: await reports.generateNow(user) });
+    }
+    if (m === 'POST' && pathname === '/api/reports/schedule') {
+      requireRole(user, REPORT_ADMINS);
+      return sendJson(res, 200, await reports.setSchedule(user, (await readJson(req)).schedule));
+    }
+    const rpm = pathname.match(/^\/api\/reports\/(\d{1,12})$/);
+    if (m === 'GET' && rpm) {
+      requireRole(user, REPORT_READERS);
+      return sendJson(res, 200, { report: await reports.one(Number(rpm[1])) });
+    }
+    if (m === 'GET' && pathname === '/api/usage') {
+      requireRole(user, REPORT_READERS);
+      const days = Math.min(365, Math.max(1, Number.parseInt(query.get('days') || '30', 10) || 30));
+      return sendJson(res, 200, await usage.summary(days));
+    }
+    if (m === 'POST' && pathname === '/api/ocr') {
+      return sendJson(res, 200, await ocr.read(user, await readJson(req, ocr.MAX_B64 + 4096)));
+    }
+    const dim = pathname.match(/^\/api\/documents\/(\d{1,12})\/image$/);
+    if (m === 'GET' && dim) {
+      const doc = await ocr.image(user, Number(dim[1]));
+      res.writeHead(200, { 'Content-Type': doc.mime, 'Content-Length': doc.buf.length, 'Cache-Control': 'private, no-store', 'Content-Disposition': 'inline' });
+      return res.end(doc.buf);
     }
 
     if (m === 'GET' && pathname === '/api/kpis') { requireRole(user, DASHBOARD_READERS); return sendJson(res, 200, { kpis: await kpis.latest() }); }
@@ -259,7 +344,7 @@ async function createApp(options = {}) {
 
   let server = null;
   return {
-    db, users, actions, kpis, records, config: cfg, handle,
+    db, users, actions, kpis, records, alerts, reports, usage, config: cfg, handle, runDaily,
     listen(port = 0, host = '127.0.0.1') {
       server = http.createServer((req, res) => { handle(req, res); });
       server.requestTimeout = 30e3;
@@ -271,9 +356,9 @@ async function createApp(options = {}) {
     },
     close() {
       const closeDb = () => { try { db.close(); } catch { /* already closed */ } };
-      if (!server) { closeDb(); return Promise.resolve(); }
+      if (!server) return ocr.close().then(closeDb);
       return new Promise(resolve => {
-        server.close(() => { closeDb(); resolve(); });
+        server.close(() => { ocr.close().then(() => { closeDb(); resolve(); }); });
         if (server.closeAllConnections) server.closeAllConnections();
       });
     },

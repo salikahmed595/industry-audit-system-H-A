@@ -231,3 +231,45 @@ A separate reviewer read the port without running anything and reported 12 findi
   - `login_throttle` afterwards holds exactly the one failure; the success released its own attempt
   - audit chain `ok`, 41 entries
 - Not verified, as before: the real Vercel + Turso deployment, and any load test (**NOT EXECUTED**).
+
+## Automation build (2026-11-26): quantified findings, alerts, CEO reports, usage & costs, OCR
+
+Scope, from "UI UX Key Changes.pdf" and the owner's answers:
+- The summary and the alerts are shown in the admin panel, with no e-mail.
+- OCR is free and local (Tesseract).
+- Scheduling is Vercel Cron, plus a script (`npm run cron`), with no outside automation platform.
+
+### What was built (vertical slices)
+| Slice | What it does | Evidence |
+|---|---|---|
+| A. Quantified findings | PKR at risk / financing cost, cash tied up, hours lost, kg and lb lost, each with "How this was calculated"; overlapping KPIs counted once | 7 unit tests in `measure.test.mjs`; browser: Command Center and spinning cards, arithmetic checked by hand |
+| B. CEO report summary | Weekly (default), every two weeks or off; catch-up on page visit; one scheduled report per day (DB unique index); on-demand "Generate now"; schedule changes audited | 8 integration tests; browser: list, open, generate, schedule change |
+| C. Alerts | High (red) / medium (amber) per KPI and plant; routed to CEO/finance/admin (all), plant head (plant), department manager (department in plant); update, escalate and reopen, self-resolve; acknowledge is audited | 5 integration tests; browser: 6 alerts listed, acknowledge, badge and counts update, department head sees only spinning |
+| D. Usage & Costs | LLM cost per day (none called: $0, stated as such), storage by kind, audit cycles per day with avg / p95 and the gather and compute split, record lead time, OCR runs | Integration tests; browser: tiles, charts (hover tooltip and table view per chart), storage breakdown |
+| E. OCR | `POST /api/ocr`: form and plant permission checks, base64 and byte-sniffed PNG/JPEG/WebP, 2.5 MB cap, local Tesseract with a 45 s timeout; values only pre-fill the form; the photo is stored as immutable evidence | 7 unit tests (`ocr.test.mjs`), integration tests including permission, 413, 415 and the image ACL; browser: a canvas-drawn ledger filled 4 values plus the date at 95% confidence, then submitted and approved |
+| Scheduler | `npm run cron` / `cron:remote` script; `/api/cron/daily` for Vercel Cron, guarded by `CRON_SECRET` (hashed constant-time compare, minimum 16 characters) | Script test (twice in a row: second run writes no report); cron route tests; config and `vercel.json` tests |
+
+### Executed
+- `npm test`: **373 tests, 373 pass, 0 fail** (241 unit + 132 integration).
+- `npm audit`: **0 vulnerabilities** (adds `tesseract.js@7.0.0` and `@tesseract.js-data/eng@1.0.0`, pinned exactly).
+- `node scripts/build-static.js <tmp>`: succeeds; the static-build test still shows only dashboard files are published.
+- Browser (built-in browser, disposable demo server `tests/e2e/demo-server.mjs` with an in-memory database and synthetic users):
+  - CEO: Alerts, then CEO Reports (open, Generate now, schedule set to every two weeks), then Usage & Costs.
+  - Operator: Read from photo, then submit.
+  - Department head: approve; the alert counts refresh.
+  - Role gating: the operator sees no dashboards; the department head sees Alerts but not Reports or Usage (`#/reports` redirects; the API answers `403`).
+  - The only console errors were the expected `401` from `/api/state` before sign-in.
+
+### Defects found and fixed during this build
+- **The weekly report measured only the last 7 days.** Monthly records (finance: DSO, DPO, gross margin) dropped out, so coverage read 4.7% against the dashboard's 8.1%, and yarn yield was "high" in the report but "medium" as an alert. It is fixed: reports now measure the same rolling 30 days as the dashboard and the alerts, and the report period still governs the activity counts. A new integration test was RED (11 records against 34), then GREEN.
+- **The usage charts' bars were 10 px tall.** A global `.bar` CSS rule overrode the SVG `height`. The chart class was renamed, and the axis labels moved to HTML so they stay readable at any width.
+- **The cron script test failed on Windows (`EBUSY`) while removing its temporary database folder.** The assertions had passed. Cleanup now retries and tolerates a leftover temp folder.
+
+### Not verified / open risks
+- **Vercel Cron and OCR on Vercel: NOT VERIFIED.**
+  - Both need a deployment with `CRON_SECRET` set.
+  - `vercel.json` sets `maxDuration: 60` and `includeFiles` for the OCR model and wasm. Whether Vercel's bundler picks up every file tesseract.js loads at run time has only been checked locally.
+  - **Smoke test after deploying:** upload one photo on Data Entry, then run the cron job once from Vercel → Settings → Cron Jobs → *Run*.
+- **OCR accuracy on real ledgers: NOT MEASURED.** The tests use clean printed text. Handwritten, angled or smudged pages, and Urdu, need a sample set from the plants before anyone relies on it. The design limits the harm: OCR only pre-fills, a person checks, and a second person approves.
+- **One libSQL test failed once and was not reproduced.** In one full run during the server work of this build, a single test in the "database adapter (libSQL)" suite failed. It has passed in every full run since. It is treated as flaky and not yet explained.
+- **Load / performance test: NOT EXECUTED.** The alert sweep and the report each run `measureAll` once per plant. That is fine at today's volumes but has not been measured at scale.

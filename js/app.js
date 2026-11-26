@@ -50,6 +50,9 @@
     flow: '<path d="M3 12h4l3-7 4 14 3-7h4"/>',
     logo: '<path d="M4 17c4-9 11-9 16-10M4 11c4-4 9-5 16-4M4 20h16"/>',
     pen: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13 7l4 4"/>',
+    bell: '<path d="M6 16V11a6 6 0 0112 0v5l2 2H4z"/><path d="M10 20a2 2 0 004 0"/>',
+    chart: '<path d="M4 20V4M4 20h16"/><path d="M8 16v-5M12 16V8M16 16v-3"/>',
+    camera: '<path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/>',
   };
   const ic = (n, cls) => `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"${cls ? ` class="${cls}"` : ''}>${I[n] || ''}</svg>`;
   const STAGE_IC = { fiber: 'fiber', spinning: 'spin', weaving: 'loom', knitting: 'loom', dyeing: 'drop', finishing: 'roll', cutting: 'cut', sewing: 'needle', packing: 'box', cash: 'cash' };
@@ -61,7 +64,8 @@
     { g: 'Diagnose', items: [['rca', 'Root-Cause Explorer', 'tree'], ['audits', 'Audit Programs', 'clip']] },
     { g: 'Operations', items: [['ops', 'Production Floor', 'factory'], ['planning', 'Planning & Capacity', 'calendar']] },
     { g: 'Supply & Cash', items: [['supply', 'Inventory & Procurement', 'box'], ['finance', 'Finance & Cash', 'cash']] },
-    { g: 'Act', items: [['actions', 'Action Center', 'check']] },
+    { g: 'Act', items: [['actions', 'Action Center', 'check'], ['alerts', 'Alerts', 'bell']] },
+    { g: 'Admin', items: [['reports', 'CEO Reports', 'clip'], ['usage', 'Usage & Costs', 'chart']] },
     { g: 'Learn & Setup', items: [['lab', 'Formula Lab', 'calc'], ['glossary', 'Glossary', 'book'], ['bench', 'Benchmarks', 'target'], ['data', 'Data & Governance', 'db']] },
   ];
   const PAGE_META = {};
@@ -103,9 +107,9 @@
     } catch (e) { /* ignore bad prefs */ }
     return p;
   }
-  const S = { ...loadPrefs(), role: 'ceo', user: null, actions: {}, log: [], m: null };
+  const S = { ...loadPrefs(), role: 'ceo', user: null, actions: {}, log: [], m: null, alertCounts: { high: 0, medium: 0 } };
   const LIVE = {}; // 'section|kpi' -> { value, asOf, source } from the KPI feed
-  const ui = { gQ: '', gDom: 'All', gLetter: '', lQ: '', lDom: 'All', aFilter: 'all', lastPage: null, pIdx: 0, pItems: [], drawerFor: null, lastFocus: null, busy: false, recTab: 'mine', recs: {}, recOpen: null, lastForm: null };
+  const ui = { gQ: '', gDom: 'All', gLetter: '', lQ: '', lDom: 'All', aFilter: 'all', lastPage: null, pIdx: 0, pItems: [], drawerFor: null, lastFocus: null, busy: false, recTab: 'mine', recs: {}, recOpen: null, lastForm: null, alertTab: 'open', report: null, usageDays: 30 };
   function save() { try { localStorage.setItem(PREF_KEY, JSON.stringify({ plant: S.plant, period: S.period })); } catch (e) { /* storage blocked: keep prefs in memory */ } }
   try { localStorage.removeItem('ta.state.v1'); } catch (e) { /* old client-side store is no longer trusted */ }
   const userCanApprove = () => !!S.user && APPROVER_ROLES.includes(S.user.role);
@@ -141,6 +145,7 @@
     S.role = VIEW_ROLES.includes(st.user.role) ? st.user.role : 'ceo';
     S.actions = st.actions || {};
     S.log = Array.isArray(st.log) ? st.log : [];
+    S.alertCounts = st.alerts || { high: 0, medium: 0 };
     applyKpis(st.kpis);
   }
   function applyAction(res) {
@@ -162,7 +167,8 @@
   // ---------------------------------------------------------------- measured values: approved department records only, never demo numbers
   const canRead = () => !!S.user && !!S.user.canReadDashboards;
   const myForms = () => (S.user && Array.isArray(S.user.forms) ? S.user.forms : []);
-  const navFor = () => (canRead() ? NAV : NAV_ENTRY_ONLY).map(g => ({ ...g, items: g.items.filter(([id]) => id !== 'entry' || myForms().length) }));
+  const navFor = () => (canRead() ? NAV : NAV_ENTRY_ONLY).map(g => ({ ...g, items: g.items.filter(([id]) => (id !== 'entry' || myForms().length) && (!ADMIN_PAGES.includes(id) || canAudit())) })).filter(g => g.items.length);
+  const ADMIN_PAGES = ['reports', 'usage']; // mirrors the server's REPORT_READERS (CEO, finance, admin)
   const todayUtc = () => new Date().toISOString().slice(0, 10);
   const todayLocal = () => { const d = new Date(); return new Date(d.getTime() - d.getTimezoneOffset() * 6e4).toISOString().slice(0, 10); };
   const uOf = u => (u === '%' ? '%' : u ? ` ${u}` : '');
@@ -278,6 +284,43 @@
     return `<span class="live">● Measured from ${r.n} approved record${r.n === 1 ? '' : 's'}${r.last ? ` · last ${esc(r.last)}` : ''}</span>${r.stale ? ' <span class="stale">· no new records lately</span>' : ''} · `;
   }
   const evList = list => `<ul class="evid">${list.map(e => `<li class="${e.signal || e.worsening ? 'sig' : ''}"><b>${esc(EV_NAME[e.kind] || e.kind)}:</b> ${esc(e.text)}</li>`).join('')}</ul>`;
+  /** Every number on a finding card comes with the calculation behind it. */
+  const howCalc = steps => (steps && steps.length ? `<details class="how"><summary>How this was calculated</summary><ol>${steps.map(t => `<li>${esc(t)}</li>`).join('')}</ol></details>` : '');
+  const qChip = (k, v) => `<span class="qc"><span>${esc(k)}</span><b>${esc(v)}</b></span>`;
+  const numTxt = v => (Math.abs(v) >= 100 ? Math.round(v).toLocaleString('en-US') : String(+v.toFixed(1)));
+  /** PKR at risk, cash tied up, hours, kg / lb and the quantity lost, per 30 days, from a measured finding's quant. */
+  function quantChips(f) {
+    const q = f.quant || {};
+    const c = [];
+    if (q.pkr) c.push(qChip(q.cash ? 'Financing cost' : 'PKR at risk', `${fmt.pkr(q.pkr)} / 30 days`));
+    if (q.cash) c.push(qChip('Cash tied up', fmt.pkr(q.cash)));
+    if (q.hours) c.push(qChip('Hours lost', `${numTxt(q.hours)} h`));
+    if (q.kg) c.push(qChip(q.qty && q.qty.unit === 'kg' ? 'Material lost' : 'Production lost', `${numTxt(q.kg)} kg · ${numTxt(q.lb)} lb`));
+    if (q.qty && !['kg', 'h', 'min'].includes(q.qty.unit)) c.push(qChip('Lost', `${numTxt(q.qty.value)} ${q.qty.unit}`));
+    const gu = q.gapUnit === 'points' ? ' pts' : q.gapUnit ? ` ${q.gapUnit}` : '';
+    c.push(qChip('Gap to target', q.gap !== undefined ? `${numTxt(q.gap)}${gu} (${fmtVal(f.gapPct)}%)` : `${fmtVal(f.gapPct)}%`));
+    return `<div class="qchips">${c.join('')}</div>`;
+  }
+  /** Baseline (audit playbook) estimate, written out: monthly estimate, period, recoverable share, confidence, and savings once verified. */
+  function baselineSteps(f, a) {
+    const k = f.kpi, u = uOf(k.unit), p = per();
+    const steps = [`Audit estimate from the diagnostic: ${fmt.pkr(f.pkr)} a month of P&L leakage. It is an estimate from the audit playbook, not a measurement from your records.`];
+    if (p.k !== 1) steps.push(`${fmt.pkr(f.pkr)} × ${p.k} months = ${money(f.pkr)} ${p.per}.`);
+    if (f.cash) steps.push(`Cash that can be released once: ${fmt.pkr(f.cash)}. Financing it at ${Math.round(D.FINANCING_RATE * 100)}% a year is worth ${fmt.pkr(f.cash * D.FINANCING_RATE / 12)} a month, which counts toward its priority.`);
+    steps.push(`About ${Math.round(f.rec * 100)}% is recoverable with the proposed fix: ${money(f.pkr * f.rec)} ${p.per}.`);
+    steps.push(`${k.name} is ${fmtVal(k.base)}${u} at the start against a target of ${fmtVal(k.target)}${u}. Confidence in the estimate: ${Math.round(f.conf * 100)}%.`);
+    const sv = savedOf(f, a);
+    if (sv) steps.push(`After the fix ${k.name} is ${fmtVal(a.after)}${u}: ${Math.round(sv.progress * 100)}% of the way to target, so about ${fmt.pkr(sv.pkr)} a month is saved (${fmt.pkr(f.pkr)} × ${Math.round(f.rec * 100)}% recoverable × ${Math.round(sv.progress * 100)}%). Estimate.`);
+    return steps;
+  }
+  /** Estimated PKR a month saved by a verified fix: the share of the gap it closed × recoverable leakage. */
+  function savedOf(f, a) {
+    if (!a || a.stage !== 'verified' || a.after === null || a.after === undefined) return null;
+    const k = f.kpi, span = k.base - k.target;
+    if (!span) return null;
+    const progress = Math.max(0, Math.min(1, (k.base - a.after) / span));
+    return { progress, pkr: Math.round(f.pkr * f.rec * progress) };
+  }
   /** A KPI that misses its target according to approved records, with its statistical evidence. */
   function mFindingCard(f, i) {
     const u = uOf(f.unit);
@@ -287,8 +330,10 @@
         <div class="chips" style="margin-bottom:6px">${tag(esc(D.SECTIONS[f.sec].name))}${stTag(f.status)}${tag('Measured', 'good')}</div>
         <h4>${esc(f.name)} is ${esc(fmtVal(f.value))}${esc(u)} against a target of ${esc(fmtVal(f.target))}${esc(u)}</h4>
         <div class="where">${esc(f.evidence[0].text)}</div></div>
-        <div class="money">${f.impactPkr ? `<b>${fmt.pkr(f.impactPkr)}</b><span>per 30 days</span>` : `<b>${esc(fmtVal(f.gapPct))}%</b><span>off target</span>`}</div></div>
+        <div class="money">${f.impactPkr ? `<b>${fmt.pkr(f.impactPkr)}</b><span>${esc(f.quant.cash ? 'financing / 30 days' : 'at risk / 30 days')}</span>` : f.quant && f.quant.kg ? `<b>${esc(numTxt(f.quant.kg))} kg</b><span>lost / 30 days</span>` : `<b>${esc(fmtVal(f.gapPct))}%</b><span>off target</span>`}</div></div>
+      ${quantChips(f)}
       ${ev.length ? evList(ev) : ''}
+      ${howCalc(f.quant && f.quant.steps)}
       <div class="fd-foot"><span class="score">From <b>${f.n}</b> approved record${f.n === 1 ? '' : 's'}</span><span class="sp"></span>
         ${f.hypotheses.length && S.actions[f.hypotheses[0].id] ? `<button class="btn sm" data-open="${esc(f.hypotheses[0].id)}">${ic('tree')} Likely cause</button>` : ''}
         <button class="btn sm primary" data-kpi="${kpiRef(f.key)}">Evidence ${ic('arrow')}</button></div>
@@ -305,6 +350,8 @@
         <h4>${esc(f.title)}</h4><div class="where">${esc(f.where)}</div></div>
         <div class="money">${amt}</div></div>
       <div class="wsd"><div><b>Why</b>${esc(f.why)}</div><div><b>So what</b>${esc(f.sowhat)}</div><div class="do"><b>Do what</b>${esc(f.dowhat)}</div></div>
+      <div class="qchips">${qChip('Leakage', `${money(f.pkr)} ${per().per}`)}${qChip('Recoverable', `${money(f.pkr * f.rec)}`)}${f.cash ? qChip('Cash to release', fmt.pkr(f.cash)) : ''}${savedOf(f, a) ? qChip('Saved (est.)', `${fmt.pkr(savedOf(f, a).pkr)} / month`) : ''}${qChip('Estimate', 'audit playbook')}</div>
+      ${howCalc(baselineSteps(f, a))}
       <div class="fd-foot"><span class="score">${ic('user')} <b>${esc(f.who)}</b></span><span class="sp"></span>
         <span class="score">Priority <b>${scoreOf(f)}</b></span><span class="score">Confidence <b>${Math.round(f.conf * 100)}%</b></span>
         <button class="btn sm" data-go="#/rca/node/${f.node}">${ic('tree')} Root cause</button>
@@ -402,7 +449,8 @@
     const canApprove = userCanApprove();
     const role = D.ROLES.find(r => r.id === S.role) || D.ROLES[0];
     const where = S.plant === 'all' ? 'the group' : plantShort(S.plant);
-    const gapCost = mf.reduce((s, f) => s + (f.impactPkr || 0), 0);
+    const tot = S.m && S.m.totals ? S.m.totals : { pkr: 0, hours: 0, kg: 0, cash: 0 };
+    const gapCost = tot.pkr; // each loss counted once, even when several KPIs measure it
     const load = kvKey('dyeing|Dye-house load');
     const constraint = load.value !== null && load.value > 90;
     const oee = kvKey('planning|OEE (plant)'), otif = kvKey('planning|OTIF delivery');
@@ -410,7 +458,7 @@
     const pending = S.user.pendingReviews || 0;
     const heroLine = !c.measured
       ? `Nothing in ${esc(where)} is measured yet. <em>Every number here will come from your departments' approved records.</em>`
-      : `<em>${esc(fmtVal(c.pct))}% of KPIs</em> are measured from ${c.records} approved record${c.records === 1 ? '' : 's'}${c.feed ? ` and ${c.feed} live-feed value${c.feed === 1 ? '' : 's'}` : ''}. <em>${mf.length}</em> miss their target${gapCost ? `, costing <em>${fmt.pkr(gapCost)}</em> per 30 days` : ''}.`;
+      : `<em>${esc(fmtVal(c.pct))}% of KPIs</em> are measured from ${c.records} approved record${c.records === 1 ? '' : 's'}${c.feed ? ` and ${c.feed} live-feed value${c.feed === 1 ? '' : 's'}` : ''}. <em>${mf.length}</em> miss their target${gapCost ? `, costing <em>${fmt.pkr(gapCost)}</em> per 30 days` : ''}${tot.hours ? `, <em>${esc(numTxt(tot.hours))} h</em> lost` : ''}${tot.kg ? `, <em>${esc(numTxt(tot.kg))} kg</em> (${esc(numTxt(tot.lb))} lb) of material or output` : ''}${tot.cash ? ` and <em>${fmt.pkr(tot.cash)}</em> of cash tied up` : ''}.`;
 
     const stream = D.STREAM.map((s, i) => {
       const r = kvKey(STREAM_KPI[s.id]);
@@ -436,7 +484,9 @@
         : '<b>Constraint not measured.</b> Enter Dye-house capacity (daily) records to see whether dyeing limits what the plant can ship.';
 
     const bySec = {};
-    mf.forEach(f => { if (f.impactPkr) bySec[f.sec] = (bySec[f.sec] || 0) + f.impactPkr; });
+    const once = new Map(); // one figure per overlap group, as in the totals
+    mf.forEach(f => { if (!f.impactPkr) return; const g = `${f.sec}|${(f.quant && f.quant.overlap) || f.key}`; once.set(g, Math.max(once.get(g) || 0, f.impactPkr)); });
+    once.forEach((v, g) => { const sec = g.split('|')[0]; bySec[sec] = (bySec[sec] || 0) + v; });
     const secItems = Object.entries(bySec).map(([k, v]) => [D.SECTIONS[k].name, Math.round(v / 1e4) / 100]);
     const bench = [['Right-first-time dyeing', 'dyeing|Right-first-time dyeing', '95–98%', '65–80%'], ['Sewing line efficiency', 'sewing|Line efficiency', '70–80%', '45–60%'], ['OEE', 'planning|OEE (plant)', '85%', '55–70%']];
 
@@ -789,6 +839,8 @@
     const once = form.key ? `one record per ${form.period === 'month' ? 'month' : form.period === 'week' ? 'week' : 'date'}${form.key.length ? ` and ${form.key.map(k => form.fields.find(x => x.k === k).label.toLowerCase()).join(' + ')}` : ''}` : 'one record per event';
     return `<form class="card rise mt entry" id="entryForm" data-type="${esc(form.id)}" novalidate aria-labelledby="efTitle">
       <h3 id="efTitle">${ic('pen')}${esc(form.label)} <span class="sub">${esc(PERIOD_WORD[form.period])} · ${esc(once)}</span></h3>
+      <div class="chips ef-photo"><button class="btn sm" type="button" id="ocrBtn">${ic('camera')} Read from photo</button><input type="file" id="ocrFile" accept="image/png,image/jpeg,image/webp" hidden><span class="small muted">Photograph the ledger or checklist page. The values found are filled in for you to check.</span></div>
+      <div class="ef-ocr" role="status" hidden></div>
       <div class="ef-grid">
         <div class="ef-f"><label class="f" for="ef-plant">Plant <span class="req" aria-hidden="true">*</span></label><select id="ef-plant" aria-describedby="ef-plant-err" required>${plants.map(p => `<option value="${esc(p)}" ${p === defPlant ? 'selected' : ''}>${esc(plantShort(p))}</option>`).join('')}</select>${err('ef-plant')}</div>
         <div class="ef-f"><label class="f" for="ef-date">${dateLabel} <span class="req" aria-hidden="true">*</span></label><input type="date" id="ef-date" value="${todayLocal()}" max="${todayLocal()}" aria-describedby="ef-date-err" required>${err('ef-date')}</div>
@@ -942,8 +994,8 @@
       else if (e.status !== 401) toast(e.message, 'bad');
     } finally { ui.busy = false; document.body.classList.remove('busy'); }
     if (!fresh) return;
-    ui.recs = {};
-    await Promise.all([refreshMe(), loadMeasured()]);
+    ui.recs = {}; ui.reports = undefined; ui.usage = undefined;
+    await Promise.all([refreshMe(), loadMeasured(), canRead() ? loadAlerts(true) : null]);
     if (ui.drawerFor === `rec:${id}`) openRecord(id, fresh);
     rerender();
   }
@@ -1033,6 +1085,267 @@
   }
 
   // ---------------------------------------------------------------- page: Data & Governance
+  // ---------------------------------------------------------------- page: Alerts (in-app, high and medium findings)
+  const SEV_TAG = { high: ['High', 'bad'], medium: ['Medium', 'warn'] };
+  const AL_ST = { open: ['Open', 'bad'], acknowledged: ['Acknowledged', 'acc'], resolved: ['Resolved', 'good'] };
+  const when = t => (t ? new Date(t).toLocaleString() : '');
+  function alertCard(a, i) {
+    const d = a.detail || {};
+    const c = [];
+    if (d.pkr) c.push(qChip(d.cash ? 'Financing cost' : 'PKR at risk', `${fmt.pkr(d.pkr)} / 30 days`));
+    if (d.cash) c.push(qChip('Cash tied up', fmt.pkr(d.cash)));
+    if (d.hours) c.push(qChip('Hours lost', `${numTxt(d.hours)} h`));
+    if (d.kg) c.push(qChip('Production lost', `${numTxt(d.kg)} kg · ${numTxt(d.lb)} lb`));
+    const sec = D.SECTIONS[a.sec];
+    return `<article class="card fd rise alert-${esc(a.severity)}" style="--i:${i % 12}" id="alert-${Number(a.id)}">
+      <div class="chips" style="margin-bottom:6px">${tag(...SEV_TAG[a.severity])}${tag(...AL_ST[a.status])}${tag(esc(plantShort(a.plant)))}${sec ? tag(esc(sec.name)) : ''}</div>
+      <h4>${esc(a.title)}</h4>
+      <p class="small muted" style="margin:4px 0 8px">${esc(d.why || '')}</p>
+      ${c.length ? `<div class="qchips">${c.join('')}</div>` : ''}
+      ${howCalc(d.steps)}
+      <p class="small muted">Raised ${esc(when(a.createdAt))}${a.updatedAt !== a.createdAt ? ` · updated ${esc(when(a.updatedAt))}` : ''}${a.ackBy ? ` · acknowledged by ${esc(a.ackBy)} ${esc(when(a.ackAt))}` : ''}${a.resolvedAt ? ` · resolved ${esc(when(a.resolvedAt))}` : ''}</p>
+      <div class="chips">${a.status === 'open' ? `<button class="btn sm primary" data-ack="${Number(a.id)}">${ic('check')} Acknowledge</button>` : ''}${sec ? `<button class="btn sm" data-go="${secRoute(a.sec)}">Open ${esc(sec.name)} ${ic('arrow')}</button>` : ''}</div>
+    </article>`;
+  }
+  function alertList() {
+    const x = ui.alerts;
+    if (!x || x === 'loading') return '<div class="card empty">Loading alerts…</div>';
+    if (x.error) return `<div class="card empty">${esc(x.error)}</div>`;
+    if (!x.alerts.length) return `<div class="card empty">${ui.alertTab === 'all' ? 'No alerts yet.' : 'No open alerts. Every measured KPI you look after is on target or near it.'}</div>`;
+    return `<div class="grid g2">${x.alerts.map(alertCard).join('')}</div>`;
+  }
+  async function loadAlerts(force) {
+    if (!force && ui.alerts !== undefined && ui.alerts !== 'loading') return;
+    ui.alerts = 'loading';
+    try {
+      const r = await api(`/api/alerts?status=${ui.alertTab === 'all' ? 'all' : 'open'}`);
+      ui.alerts = r; S.alertCounts = r.counts;
+    } catch (e) { ui.alerts = { error: e.message }; }
+    if (parse().page === 'alerts') rerender(); else renderNav(parse().page);
+  }
+  function pageAlerts() {
+    if (ui.alerts === undefined) loadAlerts();
+    const c = S.alertCounts || { high: 0, medium: 0 };
+    const tabs = [['open', 'Open & acknowledged'], ['all', 'All, including resolved']];
+    const u = S.user;
+    const who = ['ceo', 'finance', 'admin'].includes(u.role) || (u.role === 'plant' && u.plant === 'all') ? 'every plant and department'
+      : u.role === 'dept' ? `${esc((D.SECTIONS[u.department] || {}).name || 'your department')}${u.plant === 'all' ? '' : ` in ${esc(plantShort(u.plant))}`}` : esc(plantShort(u.plant));
+    return `${pageHead('Alerts', `High and medium priority findings for ${who}, raised automatically from approved records. Nothing is sent outside this system.`)}
+      ${hint('<b>How alerts work:</b> each KPI in the red zone raises a <b>high</b> alert and each in the amber zone a <b>medium</b> one, for the plant head and the department manager who own it (the CEO, finance and admin see all). An alert updates when new records change the numbers, reopens if it gets worse, and resolves itself once the KPI is back on target. Acknowledging it records in the audit log that you have seen it.')}
+      <div class="grid g4 mt">
+        <div class="card stat rise ${c.high ? 'bad' : ''}" style="--i:1"><span class="big-ic">${ic('bell')}</span><span class="k-name">High, open</span><span class="k-val">${countNum(c.high)}</span><span class="k-sub">red zone</span></div>
+        <div class="card stat rise" style="--i:2"><span class="big-ic">${ic('alert')}</span><span class="k-name">Medium, open</span><span class="k-val">${countNum(c.medium)}</span><span class="k-sub">amber zone</span></div>
+      </div>
+      <div class="chips mt" role="tablist" aria-label="Alert lists">${tabs.map(([k, l]) => `<button class="chip ${ui.alertTab === k ? 'on' : ''}" role="tab" aria-selected="${ui.alertTab === k}" data-atab="${k}">${l}</button>`).join('')}</div>
+      <div class="mt" id="alertBox">${alertList()}</div>`;
+  }
+  async function ackAlert(id) {
+    if (ui.busy) return;
+    ui.busy = true;
+    try {
+      await api(`/api/alerts/${Number(id)}/ack`, { method: 'POST' });
+      toast('Acknowledged. It stays listed until the KPI is back on target.');
+    } catch (e) { if (e.status !== 401) toast(e.message, 'bad'); } finally { ui.busy = false; }
+    await loadAlerts(true);
+  }
+
+  // ---------------------------------------------------------------- page: CEO Reports (scheduled summaries, admin panel)
+  const SCHED_NAME = { weekly: 'Every week', biweekly: 'Every two weeks', off: 'Off' };
+  async function loadReports(force) {
+    if (!force && ui.reports !== undefined && ui.reports !== 'loading') return;
+    ui.reports = 'loading';
+    try {
+      const x = await api('/api/reports');
+      const first = x.reports[0];
+      if (first && (!ui.report || !x.reports.some(r => r.id === ui.report.id))) await openReport(first.id, true);
+      ui.reports = x;
+    } catch (e) { ui.reports = { error: e.message }; }
+    if (parse().page === 'reports') rerender();
+  }
+  async function openReport(id, quiet) {
+    try { ui.report = (await api(`/api/reports/${Number(id)}`)).report; } catch (e) { if (!quiet && e.status !== 401) toast(e.message, 'bad'); return; }
+    if (!quiet) { rerender(); const b = $('#reportView'); if (b) b.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'start' }); }
+  }
+  function reportView(r) {
+    const s = r.summary, t = s.totals || {};
+    const tile = (i, icon, name, val, sub, cls) => `<div class="card stat rise ${cls || ''}" style="--i:${i}"><span class="big-ic">${ic(icon)}</span><span class="k-name">${name}</span><span class="k-val">${val}</span><span class="k-sub">${sub}</span></div>`;
+    const ch = s.change;
+    const sign = n => (n > 0 ? '+' : n < 0 ? '−' : '±');
+    const top = s.topFindings.map(f => `<tr><td>${esc(f.name)}<div class="small muted">${esc((D.SECTIONS[f.sec] || {}).name || f.sec)}</div>${howCalc(f.quant && f.quant.steps)}</td><td>${stTag(f.status)}</td><td>${esc(fmtVal(f.value))}${esc(uOf(f.unit))}</td><td>${esc(fmtVal(f.target))}${esc(uOf(f.unit))}</td><td>${f.quant && f.quant.pkr ? fmt.pkr(f.quant.pkr) : '—'}</td><td>${f.quant && f.quant.hours ? `${esc(numTxt(f.quant.hours))} h` : '—'}</td><td>${f.quant && f.quant.kg ? `${esc(numTxt(f.quant.kg))} kg` : '—'}</td></tr>`).join('');
+    const secs = Object.values(s.bySection).sort((a, b) => b.pkr - a.pkr).map(x => `<tr><td>${esc(x.name)}</td><td>${x.findings}</td><td>${x.high}</td><td>${x.pkr ? fmt.pkr(x.pkr) : '—'}</td></tr>`).join('');
+    const st = s.actions.byStage;
+    const al = s.alerts || {};
+    return `<section class="card mt rise report" id="reportView" aria-labelledby="repTitle">
+      <div class="chips">${tag(r.kind === 'scheduled' ? `Scheduled · ${esc(SCHED_NAME[r.schedule] || r.schedule)}` : 'On demand', 'acc')}${tag(`${esc(s.period.from)} to ${esc(s.period.to)}`)}${tag(`by ${esc(r.createdBy)}`)}</div>
+      <h3 id="repTitle" style="margin-top:8px">Summary for the CEO</h3>
+      <p class="lede">${esc(r.headline)}</p>
+      <div class="grid g4 mt">
+        ${tile(1, 'db', 'KPIs measured', `${esc(fmtVal(s.coverage.pct))}%`, `${s.coverage.measured} of ${s.coverage.applicable} · last 30 days, ${s.coverage.records} records`)}
+        ${tile(2, 'cash', 'PKR at risk', t.pkr ? fmt.pkr(t.pkr) : '—', 'per 30 days, at finance cost rates', t.pkr ? 'bad' : '')}
+        ${tile(3, 'clock', 'Hours lost', t.hours ? `${esc(numTxt(t.hours))} h` : '—', 'machine and line time, per 30 days')}
+        ${tile(4, 'box', 'Production lost', t.kg ? `${esc(numTxt(t.kg))} kg` : '—', t.kg ? `${esc(numTxt(t.lb))} lb, per 30 days` : 'per 30 days')}
+        ${tile(5, 'alert', 'Off target', String(s.findingsCount), `${s.high} high · ${s.medium} medium`, s.high ? 'bad' : '')}
+        ${tile(6, 'bell', 'Alerts open', String((al.openHigh || 0) + (al.openMedium || 0)), `${al.openHigh || 0} high · ${al.raised || 0} raised, ${al.resolved || 0} resolved this period`)}
+        ${tile(7, 'check', 'Fixes verified', String(s.actions.verified.length), `${s.actions.overdue} overdue · ${st.in_progress || 0} in progress`)}
+        ${tile(8, 'pen', 'Records approved', String(s.records.approved), `${s.records.rejected} rejected · ${s.records.waiting} waiting`)}
+      </div>
+      ${t.cash ? `<p class="small">Cash tied up beyond target: <b>${fmt.pkr(t.cash)}</b>. Its financing cost is part of the PKR at risk.</p>` : ''}
+      ${ch ? `<p class="small">Since the report of ${esc(ch.since)}: PKR at risk ${sign(ch.pkr)}${fmt.pkr(Math.abs(ch.pkr))}, coverage ${sign(ch.coveragePct)}${esc(fmtVal(Math.abs(ch.coveragePct)))} points, findings ${sign(ch.findings)}${Math.abs(ch.findings)}.</p>` : '<p class="small muted">This is the first report, so there is no change to compare with yet.</p>'}
+      ${secT('Top findings')}
+      ${top ? `<div class="tw"><table><thead><tr><th>KPI</th><th>Status</th><th>Measured</th><th>Target</th><th>PKR / 30 days</th><th>Hours</th><th>kg</th></tr></thead><tbody>${top}</tbody></table></div>` : '<div class="empty">Every measured KPI is on target.</div>'}
+      ${secs ? `${secT('By area')}<div class="tw"><table><thead><tr><th>Area</th><th>Findings</th><th>High</th><th>PKR / 30 days</th></tr></thead><tbody>${secs}</tbody></table></div>` : ''}
+      ${secT('Corrective actions')}
+      <div class="chips">${Object.entries(st).map(([k, n]) => tag(`${esc(STAGE_NAME[k] || k)}: ${n}`)).join('')}</div>
+      <p class="small muted mt">Totals count overlapping KPIs once (for example spinning waste and yield measure the same lost fibre). Every figure comes from approved records; open "How this was calculated" on a finding for the arithmetic.</p>
+      <div class="chips mt"><button class="btn sm" id="printReport">${ic('download')} Print or save as PDF</button></div>
+    </section>`;
+  }
+  function pageReports() {
+    if (ui.reports === undefined) loadReports();
+    const x = ui.reports;
+    if (!x || x === 'loading') return `${pageHead('CEO Reports', 'Loading…')}<div class="card empty">Loading reports…</div>`;
+    if (x.error) return `${pageHead('CEO Reports', '')}<div class="card empty">${esc(x.error)}</div>`;
+    const ctl = x.canManage
+      ? `<label class="f inline" for="schedSel">Schedule</label><select id="schedSel">${Object.entries(SCHED_NAME).map(([k, l]) => `<option value="${k}" ${k === x.schedule ? 'selected' : ''}>${l}</option>`).join('')}</select><button class="btn primary" id="genReport">${ic('spark')} Generate now</button>`
+      : '';
+    const rows = x.reports.map(r => `<tr ${ui.report && ui.report.id === r.id ? 'aria-current="true"' : ''}><td>${esc(r.from)} to ${esc(r.to)}</td><td>${r.kind === 'scheduled' ? tag('Scheduled', 'acc') : tag('On demand')}</td><td class="small">${esc(r.headline)}</td><td>${esc(r.createdBy)}</td><td><button class="btn sm" data-report="${Number(r.id)}">Open</button></td></tr>`).join('');
+    return `${pageHead('CEO Reports', `A summary of the audit for the CEO, written ${x.schedule === 'off' ? 'only on demand (the schedule is off)' : `${SCHED_NAME[x.schedule].toLowerCase()} by the daily job`} and kept here in the admin panel. Next due: ${x.nextDue ? esc(x.nextDue) : '—'}.`, ctl)}
+      ${hint('<b>What is in it:</b> how much is measured, what is off target and what it costs in PKR, hours and kg, open alerts, corrective actions and record activity, each compared with the previous report. If the daily job is missed, the report is written the next time someone opens this page.')}
+      <div class="card tw mt">${rows ? `<table><thead><tr><th>Period</th><th>Type</th><th>Headline</th><th>By</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : '<div class="empty">No reports yet.</div>'}</div>
+      ${ui.report ? reportView(ui.report) : ''}`;
+  }
+  async function generateReport() {
+    if (ui.busy) return;
+    ui.busy = true; document.body.classList.add('busy');
+    try {
+      const { report } = await api('/api/reports', { method: 'POST' });
+      ui.report = report;
+      toast('Report written.');
+    } catch (e) { if (e.status !== 401) toast(e.message, 'bad'); } finally { ui.busy = false; document.body.classList.remove('busy'); }
+    await loadReports(true);
+  }
+  async function setSchedule(value) {
+    try {
+      await api('/api/reports/schedule', { method: 'POST', body: { schedule: value } });
+      toast(`CEO report schedule: ${SCHED_NAME[value].toLowerCase()}.`);
+    } catch (e) { if (e.status !== 401) toast(e.message, 'bad'); }
+    await loadReports(true);
+  }
+
+  // ---------------------------------------------------------------- page: Usage & Costs (LLM spend, storage, audit cycles)
+  const bytesTxt = b => (b >= 1073741824 ? `${(b / 1073741824).toFixed(2)} GB` : b >= 1048576 ? `${(b / 1048576).toFixed(1)} MB` : b >= 1024 ? `${(b / 1024).toFixed(1)} KB` : `${b} B`);
+  const msTxt = ms => (ms >= 1000 ? `${(ms / 1000).toFixed(1)} s` : `${Math.round(ms)} ms`);
+  /** One series of daily bars on a recessive grid; every day has a hover tooltip, and a table view sits below. */
+  function dayBars(title, points, valueOf, label) {
+    // The SVG stretches to the card (preserveAspectRatio none); labels are HTML so they stay readable at any width.
+    const W = 600, H = 120, n = points.length, step = W / n;
+    const max = Math.max(...points.map(valueOf));
+    const top = max > 0 ? max : 1;
+    const bw = Math.max(1, step * 0.8);
+    const bars = points.map((p, i) => {
+      const v = valueOf(p), h = v ? Math.max(2, (H - 1) * v / top) : 0;
+      const x = i * step;
+      return `<g><title>${esc(p.day)}: ${esc(label(p))}</title><rect class="hit" x="${x.toFixed(1)}" y="0" width="${step.toFixed(1)}" height="${H}"/>${h ? `<rect class="dbar" x="${(x + (step - bw) / 2).toFixed(1)}" y="${(H - h).toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}"/>` : ''}</g>`;
+    }).join('');
+    const busiest = points.reduce((a, b) => (valueOf(b) > valueOf(a) ? b : a), points[0]);
+    const rows = points.filter(p => valueOf(p)).map(p => `<tr><td>${esc(p.day)}</td><td>${esc(label(p))}</td></tr>`).join('');
+    return `<figure class="card rise daybars"><figcaption><b>${esc(title)}</b><span class="small muted">${max > 0 ? `peak ${esc(label(busiest))} on ${esc(busiest.day)}` : 'nothing recorded'}</span></figcaption>
+      <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${esc(title)} over ${n} days. ${max > 0 ? `Highest on ${esc(busiest.day)}: ${esc(label(busiest))}.` : 'Nothing recorded.'}">
+        <line class="grid" x1="0" x2="${W}" y1="0.5" y2="0.5" vector-effect="non-scaling-stroke"/><line class="base" x1="0" x2="${W}" y1="${H}" y2="${H}" vector-effect="non-scaling-stroke"/>${bars}
+      </svg>
+      <div class="ax-row small muted"><span>${esc(points[0].day)}</span><span>scale 0 to ${esc(max > 0 ? numTxt(max) : '0')}</span><span>${esc(points[n - 1].day)}</span></div>
+      <details class="how"><summary>Show as table</summary><div class="tw"><table><thead><tr><th>Day</th><th>${esc(title)}</th></tr></thead><tbody>${rows || '<tr><td colspan="2">Nothing in this period.</td></tr>'}</tbody></table></div></details>
+    </figure>`;
+  }
+  async function loadUsage(force) {
+    if (!force && ui.usage !== undefined && ui.usage !== 'loading') return;
+    ui.usage = 'loading';
+    try { ui.usage = await api(`/api/usage?days=${ui.usageDays}`); } catch (e) { ui.usage = { error: e.message }; }
+    if (parse().page === 'usage') rerender();
+  }
+  function pageUsage() {
+    if (ui.usage === undefined) loadUsage();
+    const u = ui.usage;
+    const ranges = [[7, '7 days'], [30, '30 days'], [90, '90 days']];
+    const ctl = `<div class="chips" role="group" aria-label="Period">${ranges.map(([d, l]) => `<button class="chip ${ui.usageDays === d ? 'on' : ''}" data-udays="${d}" aria-pressed="${ui.usageDays === d}">${l}</button>`).join('')}</div>`;
+    if (!u || u === 'loading') return `${pageHead('Usage & Costs', 'Loading…', ctl)}<div class="card empty">Loading usage…</div>`;
+    if (u.error) return `${pageHead('Usage & Costs', '', ctl)}<div class="card empty">${esc(u.error)}</div>`;
+    const st = u.storage, c = u.cycles, lt = u.records.leadTime;
+    const todayCyc = c.days[c.days.length - 1];
+    const maxCat = Math.max(1, ...st.categories.map(x => x.bytes));
+    const cats = st.categories.map(x => `<div class="ucat"><div class="k-sub"><span><b>${esc(x.name)}</b> · ${esc(x.what)}</span><span><b>${esc(bytesTxt(x.bytes))}</b> · ${x.rows.toLocaleString('en-US')} rows</span></div><div class="meter"><i style="--w:${(x.bytes / maxCat * 100).toFixed(1)}%"></i></div></div>`).join('');
+    const hrs = h => (h === null || h === undefined ? '—' : `${numTxt(h)} h`);
+    return `${pageHead('Usage & Costs', `What the audit system itself costs to run, ${esc(u.period.from)} to ${esc(u.period.to)}, measured on this server.`, ctl)}
+      <div class="grid g4 mt">
+        <div class="card stat rise" style="--i:1"><span class="big-ic">${ic('cash')}</span><span class="k-name">LLM API cost</span><span class="k-val">$${u.llm.costUsd.toFixed(2)}</span><span class="k-sub">${u.llm.calls} call${u.llm.calls === 1 ? '' : 's'} in ${u.period.days} days</span></div>
+        <div class="card stat rise" style="--i:2"><span class="big-ic">${ic('db')}</span><span class="k-name">Storage used</span><span class="k-val">${esc(bytesTxt(st.totalBytes))}</span><span class="k-sub">${st.fileBytes ? `database file ${esc(bytesTxt(st.fileBytes))}` : 'stored values'}</span></div>
+        <div class="card stat rise" style="--i:3"><span class="big-ic">${ic('reset')}</span><span class="k-name">Audit cycles</span><span class="k-val">${countNum(c.total)}</span><span class="k-sub">${todayCyc ? `${todayCyc.count} today · ` : ''}${(c.total / u.period.days).toFixed(1)} a day</span></div>
+        <div class="card stat rise" style="--i:4"><span class="big-ic">${ic('clock')}</span><span class="k-name">Time per cycle</span><span class="k-val">${esc(msTxt(c.avgMs))}</span><span class="k-sub">average · 95% under ${esc(msTxt(c.p95Ms))}</span></div>
+      </div>
+      <p class="small muted mt">${esc(u.llm.note)}</p>
+      ${secT('Audit cycles per day')}
+      <p class="small muted">${esc(c.what)}</p>
+      <div class="grid g2">${dayBars('Cycles per day', c.days, p => p.count, p => `${p.count} cycle${p.count === 1 ? '' : 's'}`)}${dayBars('Average time per cycle (ms)', c.days, p => p.avgMs, p => (p.count ? `${msTxt(p.avgMs)} (gathering ${msTxt(p.gatherMs)}, computing ${msTxt(p.computeMs)})` : 'no cycles'))}</div>
+      ${secT('From data gathering to final computation')}
+      <div class="grid g4">
+        <div class="card stat rise"><span class="k-name">Record entered → decided</span><span class="k-val">${esc(hrs(lt.medianHours))}</span><span class="k-sub">median of ${u.records.decided} · 90% within ${esc(hrs(lt.p90Hours))}</span></div>
+        <div class="card stat rise"><span class="k-name">Waiting for approval</span><span class="k-val">${u.records.waiting}</span><span class="k-sub">${u.records.oldestWaiting ? `oldest since ${esc(when(u.records.oldestWaiting))}` : 'none waiting'}</span></div>
+        <div class="card stat rise"><span class="k-name">Reports written</span><span class="k-val">${u.reports.generated}</span><span class="k-sub">${u.reports.generated ? `${esc(msTxt(u.reports.avgMs))} each` : 'none in this period'}</span></div>
+        <div class="card stat rise"><span class="k-name">Photos read (OCR)</span><span class="k-val">${u.ocr.runs}</span><span class="k-sub">${u.ocr.runs ? `${esc(msTxt(u.ocr.avgMs))} each · ${esc(bytesTxt(u.ocr.bytes))} · ` : ''}on this server, no fee</span></div>
+      </div>
+      <p class="small muted">${esc(lt.what)} The cycle time above is the computation that follows.</p>
+      ${secT('Storage by kind')}
+      <div class="card rise">${cats}<p class="small muted mt">${esc(st.note)}</p></div>
+      ${secT('LLM API cost per day')}
+      ${dayBars('LLM API cost per day (USD)', u.llm.days, p => p.costUsd, p => `$${p.costUsd.toFixed(2)} · ${p.calls} call${p.calls === 1 ? '' : 's'}`)}`;
+  }
+
+  // ---------------------------------------------------------------- OCR: read a photographed ledger or checklist into the entry form
+  const OCR_MAX = 2.5 * 1024 * 1024;
+  const readAsDataUrl = file => new Promise((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(r.result); r.onerror = () => reject(new Error('The photo could not be opened.')); r.readAsDataURL(file); });
+  /** Phone photos are often over the 2.5 MB limit: shrink those to at most 2000 px on the long side (plenty for OCR). */
+  async function photoForOcr(file) {
+    const url = await readAsDataUrl(file);
+    if (file.size <= OCR_MAX * 0.95) return url;
+    const img = await new Promise((resolve, reject) => { const i = new Image(); i.onload = () => resolve(i); i.onerror = () => reject(new Error('The photo could not be opened.')); i.src = url; });
+    const k = Math.min(1, 2000 / Math.max(img.naturalWidth, img.naturalHeight));
+    const cv = document.createElement('canvas');
+    cv.width = Math.round(img.naturalWidth * k); cv.height = Math.round(img.naturalHeight * k);
+    cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+    return cv.toDataURL('image/jpeg', 0.85);
+  }
+  async function readPhoto(input) {
+    const file = input.files && input.files[0];
+    const el = $('#entryForm');
+    if (!file || !el || ui.busy) { input.value = ''; return; }
+    const box = $('.ef-ocr', el);
+    const btn = $('#ocrBtn', el);
+    if (!/^image\/(png|jpeg|webp)$/.test(file.type)) { input.value = ''; box.innerHTML = '<b>Only PNG, JPEG or WebP photos can be read.</b>'; box.hidden = false; return; }
+    ui.busy = true; btn.disabled = true;
+    box.innerHTML = `${ic('clock')} Reading the photo on the server. This takes a few seconds.`; box.hidden = false;
+    try {
+      const image = await photoForOcr(file);
+      const r = await api('/api/ocr', { method: 'POST', body: { form: el.dataset.type, plant: $('#ef-plant', el).value, image } });
+      $$('.ocr-filled', el).forEach(x => x.classList.remove('ocr-filled'));
+      let n = 0;
+      for (const [k, v] of Object.entries(r.prefill)) {
+        const c = $(`#ef-${CSS.escape(k)}`, el);
+        if (!c) continue;
+        c.value = String(v);
+        if (c.value === String(v)) { c.classList.add('ocr-filled'); c.removeAttribute('aria-invalid'); n++; }
+      }
+      if (r.date && r.date <= todayLocal()) { $('#ef-date', el).value = r.date; $('#ef-date', el).classList.add('ocr-filled'); }
+      const conf = Number.isFinite(r.confidence) ? ` (text confidence ${Math.round(r.confidence)}%)` : '';
+      const rej = r.rejected.length ? `<li>Not filled, outside the allowed range: ${r.rejected.map(x => `${esc(x.label)} “${esc(String(x.value))}” (${esc(x.reason)})`).join(', ')}.</li>` : '';
+      box.innerHTML = `<b>${n ? `Filled ${n} value${n === 1 ? '' : 's'} from the photo${conf}.` : `No values on this form were recognised${conf}.`}</b> Check every highlighted value against the sheet before you submit. A second person still approves the record.
+        <ul>${rej}${r.date ? `<li>Date read from the photo: ${esc(r.date)}.</li>` : ''}<li><a href="/api/documents/${Number(r.document.id)}/image" target="_blank" rel="noopener">Open the stored photo</a> (kept as audit evidence).</li></ul>
+        <details class="how"><summary>Text read from the photo</summary><pre class="ocr-text">${esc(r.text)}</pre></details>`;
+      toast(n ? `Filled ${n} value${n === 1 ? '' : 's'} from the photo. Check them before submitting.` : 'No values recognised. Enter them by hand.', n ? '' : 'bad');
+    } catch (e) {
+      if (e.status !== 401) box.innerHTML = `<b>${esc(e.message)}</b>`;
+    } finally { ui.busy = false; btn.disabled = false; input.value = ''; }
+  }
+
   function pageData() {
     const c = cov();
     const steps = [['Enter', 'Staff fill department forms'], ['Validate', 'Same rules in browser and server'], ['Flag', 'Outliers vs plant history'], ['Approve', 'A different person checks'], ['Measure', 'Formulas on approved records'], ['Test', 'Control chart, trend, Welch t'], ['Quantify', 'PKR at finance cost rates'], ['Act', 'Findings become 8D actions']];
@@ -1232,7 +1545,7 @@
   }
 
   // ---------------------------------------------------------------- router
-  const ROUTES = { command: pageCommand, entry: pageEntry, rca: pageRca, audits: pageAudits, ops: pageOps, planning: pagePlanning, supply: pageSupply, finance: pageFinance, actions: pageActions, lab: pageLab, glossary: pageGlossary, bench: pageBench, data: pageData };
+  const ROUTES = { command: pageCommand, entry: pageEntry, rca: pageRca, audits: pageAudits, ops: pageOps, planning: pagePlanning, supply: pageSupply, finance: pageFinance, actions: pageActions, lab: pageLab, glossary: pageGlossary, bench: pageBench, data: pageData, alerts: pageAlerts, reports: pageReports, usage: pageUsage };
   function parse() {
     const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(p => { try { return decodeURIComponent(p); } catch (e) { return ''; } });
     const allowed = new Set(navFor().flatMap(g => g.items.map(([id]) => id)));
@@ -1245,7 +1558,7 @@
     const canApprove = userCanApprove();
     const badge = canRead() ? findingsFor().filter(f => { const a = S.actions[f.id]; return a && (canApprove ? a.stage === 'diagnosed' : ['approved', 'in_progress'].includes(a.stage)); }).length : 0;
     const pending = (S.user && S.user.pendingReviews) || 0;
-    const badgeFor = id => { const n = id === 'actions' ? badge : id === 'entry' ? pending : 0; return n ? `<span class="badge" aria-label="${n} need attention">${n}</span>` : ''; };
+    const badgeFor = id => { const n = id === 'actions' ? badge : id === 'entry' ? pending : id === 'alerts' ? S.alertCounts.high + S.alertCounts.medium : 0; return n ? `<span class="badge" aria-label="${n} need attention">${n}</span>` : ''; };
     $('#nav').innerHTML = navFor().map(g => `<div class="nav-g">${esc(g.g)}</div>${g.items.map(([id, name, icon]) => `<a href="#/${id}" ${id === page ? 'aria-current="page"' : ''} title="${esc(name)}">${ic(icon)}<span>${esc(name)}</span>${badgeFor(id)}</a>`).join('')}`).join('');
   }
   function rerender(scroll) {
@@ -1306,7 +1619,7 @@
     $('#pList').addEventListener('click', e => { const it = e.target.closest('[data-pi]'); if (it) pickPalette(+it.dataset.pi); });
 
     document.addEventListener('click', e => {
-      const t = e.target.closest('[data-go],[data-open],[data-term],[data-kpi],[data-adv],[data-reopen],[data-verify],[data-close],[data-gdom],[data-letter],[data-ldom],[data-rec],[data-review],[data-rtab],#exportCsv,#verifyChain,#signOut,.nav a');
+      const t = e.target.closest('[data-go],[data-open],[data-term],[data-kpi],[data-adv],[data-reopen],[data-verify],[data-close],[data-gdom],[data-letter],[data-ldom],[data-rec],[data-review],[data-rtab],[data-ack],[data-atab],[data-report],[data-udays],#genReport,#printReport,#ocrBtn,#exportCsv,#verifyChain,#signOut,.nav a');
       if ($('#side').classList.contains('open') && !e.target.closest('#side')) { $('#side').classList.remove('open'); $('#menuBtn').setAttribute('aria-expanded', 'false'); if (!t) return; }
       if (!t || t.disabled) return;
       if (t.matches('.nav a')) { $('#side').classList.remove('open'); $('#menuBtn').setAttribute('aria-expanded', 'false'); return; }
@@ -1321,6 +1634,13 @@
         loadRecords(ui.recTab);
         return;
       }
+      if (t.dataset.ack) { ackAlert(Number(t.dataset.ack)); return; }
+      if (t.dataset.atab) { ui.alertTab = t.dataset.atab; ui.alerts = undefined; rerender(); return; }
+      if (t.dataset.report) { openReport(Number(t.dataset.report)); return; }
+      if (t.dataset.udays) { ui.usageDays = Number(t.dataset.udays); ui.usage = undefined; rerender(); return; }
+      if (t.id === 'genReport') { generateReport(); return; }
+      if (t.id === 'printReport') { window.print(); return; }
+      if (t.id === 'ocrBtn') { const f = $('#ocrFile'); if (f) f.click(); return; }
       if (t.dataset.term) { openTerm(t.dataset.term); return; }
       if (t.dataset.kpi) { openKpi(t.dataset.kpi); return; }
       if (t.dataset.adv) { advance(t.dataset.adv); return; }
@@ -1343,6 +1663,8 @@
       if (e.target.closest && e.target.closest('#entryForm')) { e.target.removeAttribute('aria-invalid'); const m = document.getElementById(`${e.target.id}-err`); if (m) m.hidden = true; }
     });
     document.addEventListener('change', e => {
+      if (e.target.id === 'schedSel') { setSchedule(e.target.value); return; }
+      if (e.target.id === 'ocrFile') { readPhoto(e.target); return; }
       const d = e.target.dataset && e.target.dataset.d8;
       if (!d) return;
       const [id, k] = d.split(':');
@@ -1420,6 +1742,7 @@
     // Plant-scoped users see only their own plant (the server refuses other plants' measured data).
     if (S.user.plant !== 'all' && S.plant !== S.user.plant) { S.plant = S.user.plant; save(); }
     ui.recs = {}; ui.recOpen = null; PALETTE = null; // a different user may have signed in
+    ui.alerts = undefined; ui.reports = undefined; ui.report = null; ui.usage = undefined;
     await loadMeasured();
     $('#login').hidden = true; $('#login').innerHTML = '';
     document.body.classList.remove('locked');
@@ -1432,6 +1755,8 @@
     $('#periodSel').closest('label').hidden = !canRead();
     renderUserBtn();
     rerender(true);
+    const hc = S.alertCounts.high;
+    if (canRead() && hc) toast(`${hc} high-priority alert${hc === 1 ? ' is' : 's are'} open. See Alerts.`, 'bad');
   }
   function renderUserBtn() {
     const b = $('#userBtn');

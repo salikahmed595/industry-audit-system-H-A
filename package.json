@@ -17,9 +17,13 @@
     "user:list": "node --disable-warning=ExperimentalWarning server/cli/users.js list",
     "dev": "node --disable-warning=ExperimentalWarning --env-file=dev.env server/index.js",
     "build": "node scripts/build-static.js",
-    "user:remote": "node --env-file=.env.turso server/cli/users.js"
+    "user:remote": "node --env-file=.env.turso server/cli/users.js",
+    "cron": "node --disable-warning=ExperimentalWarning server/cli/cron.js",
+    "cron:remote": "node --disable-warning=ExperimentalWarning --env-file=.env.turso server/cli/cron.js"
   },
   "dependencies": {
-    "@libsql/client": "0.18.0"
+    "@libsql/client": "0.18.0",
+    "@tesseract.js-data/eng": "1.0.0",
+    "tesseract.js": "7.0.0"
   }
 }

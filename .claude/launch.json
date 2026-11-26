@@ -4,8 +4,22 @@
     {
       "name": "textile-audit",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["--disable-warning=ExperimentalWarning", "--env-file=dev.env", "server/index.js"],
+      "runtimeArgs": [
+        "--disable-warning=ExperimentalWarning",
+        "--env-file=dev.env",
+        "server/index.js"
+      ],
       "port": 5174
+    },
+    {
+      "name": "e2e-demo",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "--disable-warning=ExperimentalWarning",
+        "tests/e2e/demo-server.mjs",
+        "5175"
+      ],
+      "port": 5175
     }
   ]
 }

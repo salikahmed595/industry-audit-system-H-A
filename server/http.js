@@ -47,7 +47,9 @@ function drainCapped(req) {
   req.resume();
 }
 
-function readJson(req) {
+/** limit: largest body accepted (default 256 KB; photo uploads pass more, never above DRAIN_LIMIT). */
+function readJson(req, limit = BODY_LIMIT) {
+  const max = Math.min(limit, DRAIN_LIMIT);
   return new Promise((resolve, reject) => {
     const type = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
     const declared = Number(req.headers['content-length'] || 0);
@@ -58,7 +60,7 @@ function readJson(req) {
     req.on('data', c => {
       size += c.length;
       if (size > DRAIN_LIMIT) { req.destroy(); reject(new HttpError(413, 'Request body too large.')); return; }
-      if (size > BODY_LIMIT) { tooBig = true; return; }
+      if (size > max) { tooBig = true; return; }
       chunks.push(c);
     });
     req.on('end', () => {

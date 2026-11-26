@@ -189,7 +189,9 @@ describe('measureAll: ground truth, coverage, findings', () => {
     const out = M.measureAll([...days, rec('cost_rates', { cotton_pkr_kg: 500 }, { plant: 'GRP', date: '2026-11-01' })], { today: TODAY });
     const f = out.findings.find(x => x.key === 'spinning|Yarn yield');
     assert.equal(f.impactPkr, Math.round(0.03 * 30000 * 500)); // 3 points short × 30,000 kg × PKR 500
-    assert.equal(out.findings[0].key, 'spinning|Yarn yield', 'largest measured loss ranks first');
+    const top = Math.max(...out.findings.map(x => x.impactPkr || 0));
+    assert.equal(top, 450000);
+    assert.equal(out.findings[0].impactPkr, top, 'largest measured loss ranks first');
   });
   test('stratification finds the shift that drives the gap (Welch t-test)', () => {
     const recs = [];
@@ -219,6 +221,61 @@ describe('measureAll: ground truth, coverage, findings', () => {
     const out = M.measureAll([spin(1000, 880, { bales_checked: 10, contamination_g: 150 })], { today: TODAY });
     const f = out.findings.find(x => x.key === 'spinning|Contamination');
     assert.ok(f.hypotheses.some(h => h.id === 'F01'));
+  });
+  test('quantifies material loss in kg and lb, with the calculation spelled out', () => {
+    const days = Array.from({ length: 30 }, (_, i) => spin(1000, 880, {}, { date: M.dates.addDays(TODAY, -i) }));
+    const out = M.measureAll([...days, rec('cost_rates', { cotton_pkr_kg: 500 }, { plant: 'GRP', date: '2026-11-01' })], { today: TODAY });
+    const q = out.findings.find(x => x.key === 'spinning|Spinning waste').quant;
+    near(q.kg, 900); // 3 points over the 9% target × 30,000 kg cotton
+    near(q.lb, 900 * 2.20462, 0.1);
+    assert.equal(q.qty.unit, 'kg');
+    assert.equal(q.pkr, 450000);
+    const text = q.steps.join(' ');
+    for (const part of ['12', '9', '3 percentage points', '30,000', '900 kg', 'PKR 500', 'PKR 450.0K']) assert.ok(text.includes(part), `explanation mentions ${part}: ${text}`);
+  });
+  test('totals never count the same loss twice (yield and waste measure the same cotton)', () => {
+    const days = Array.from({ length: 30 }, (_, i) => spin(1000, 880, {}, { date: M.dates.addDays(TODAY, -i) }));
+    const out = M.measureAll([...days, rec('cost_rates', { cotton_pkr_kg: 500 }, { plant: 'GRP', date: '2026-11-01' })], { today: TODAY });
+    assert.equal(out.findings.find(x => x.key === 'spinning|Yarn yield').quant.pkr, 450000);
+    assert.equal(out.totals.pkr, 450000);
+    near(out.totals.kg, 900);
+  });
+  test('quantifies machine downtime in hours, PKR and kg of production lost', () => {
+    const days = Array.from({ length: 30 }, (_, i) => rec('maintenance_day', { unplanned_downtime_h: 10 }, { plant: 'KHI', date: M.dates.addDays(TODAY, -i) }));
+    const rates = rec('cost_rates', { constraint_pkr_h: 38500, output_kg_h: 500 }, { plant: 'KHI', date: '2026-11-01' });
+    const q = M.measureAll([...days, rates], { plant: 'KHI', today: TODAY }).findings.find(x => x.key === 'maintenance|Unplanned downtime').quant;
+    near(q.hours, 100); // 300 h against a 200 h target
+    assert.equal(q.pkr, 3850000);
+    near(q.kg, 50000);
+    near(q.lb, 50000 * 2.20462, 1);
+    assert.match(q.steps.join(' '), /100 h[\s\S]*500 kg\/h[\s\S]*50,000 kg/);
+  });
+  test('quantifies lost loom hours from efficiency', () => {
+    const days = Array.from({ length: 30 }, (_, i) => rec('weave_shift', { shift: 'A', machine: 'Shed 1', loom_hours_avail: 100, loom_hours_run: 80 }, { date: M.dates.addDays(TODAY, -i) }));
+    const q = M.measureAll([...days, rec('cost_rates', { machine_pkr_h: 2000 }, { plant: 'GRP', date: '2026-11-01' })], { today: TODAY }).findings.find(x => x.key === 'weaving|Loom efficiency').quant;
+    near(q.hours, 240); // 8 points below 88% × 3,000 available loom hours
+    assert.equal(q.pkr, 480000);
+  });
+  test('quantifies cash tied up by slow collections (DSO) and its financing cost', () => {
+    const r = rec('finance_month', { sales_m: 100, cogs_m: 80, receivables_m: 300, payables_m: 50, purchases_m: 60 }, { plant: 'GRP', date: '2026-11-01' });
+    const q = M.measureAll([r], { today: TODAY }).findings.find(x => x.key === 'finance|DSO').quant;
+    const gap = 300 / 100 * 30.44 - 55;
+    near(q.cash, gap * 100 / 30.44 * 1e6, 1e4);
+    near(q.pkr, q.cash * D.FINANCING_RATE * 30 / 365, 10);
+    assert.match(q.pkrWhat, /financing/);
+  });
+  test('names the missing cost rate instead of guessing a PKR figure', () => {
+    const days = Array.from({ length: 30 }, (_, i) => spin(1000, 880, {}, { date: M.dates.addDays(TODAY, -i) }));
+    const q = M.measureAll(days, { today: TODAY }).findings.find(x => x.key === 'spinning|Spinning waste').quant;
+    assert.equal(q.pkr, null);
+    near(q.kg, 900);
+    assert.ok(q.missing.includes('Cotton cost'));
+    assert.match(q.steps.join(' '), /Cotton cost/);
+  });
+  test('every finding explains itself, even without a volume basis', () => {
+    const f = M.measureAll([spin(1000, 880, { bales_checked: 10, contamination_g: 150 })], { today: TODAY }).findings.find(x => x.key === 'spinning|Contamination');
+    assert.ok(f.quant.steps.length >= 2);
+    assert.match(f.quant.steps.join(' '), /15 g\/bale[\s\S]*gap only/);
   });
   test('stale data is marked', () => {
     const out = M.measureAll([spin(1000, 900, {}, { date: '2026-11-10' })], { today: TODAY });

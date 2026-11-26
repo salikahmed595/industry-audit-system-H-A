@@ -9,7 +9,8 @@ const { HttpError } = require('./errors');
 const PLANTS = ['all', ...M.PLANT_IDS];
 const CACHE_MAX = 64;
 
-function makeMeasured(records, clock) {
+/** onCycle({ ms, gatherMs, computeMs, records, plant, period }): called after each full recalculation (cache miss). */
+function makeMeasured(records, clock, { onCycle } = {}) {
   const cache = new Map();
   async function get(query, user) {
     const own = user && user.plant !== 'all' ? user.plant : null;
@@ -22,7 +23,12 @@ function makeMeasured(records, clock) {
     const key = `${plant}|${period}|${today}|${await records.generation()}`;
     if (cache.has(key)) return cache.get(key);
     const win = M.windowFor(period, today);
-    const out = M.measureAll(await records.approvedSince(win.from), { plant, period, today });
+    const t0 = performance.now();
+    const recs = await records.approvedSince(win.from);
+    const t1 = performance.now();
+    const out = M.measureAll(recs, { plant, period, today });
+    const t2 = performance.now();
+    if (onCycle) await onCycle({ ms: t2 - t0, gatherMs: t1 - t0, computeMs: t2 - t1, records: recs.length, plant, period });
     if (cache.size >= CACHE_MAX) cache.clear();
     cache.set(key, out);
     return out;

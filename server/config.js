@@ -32,10 +32,14 @@ function loadConfig(env = process.env) {
     trustProxy: bool(env.TRUST_PROXY, onVercel),
     sessionTtlHours: int('SESSION_TTL_HOURS', env.SESSION_TTL_HOURS, 12, 1, 168),
     loginMaxFailures: int('LOGIN_MAX_FAILURES', env.LOGIN_MAX_FAILURES, 5, 3, 50),
+    // Shared secret for the daily job (/api/cron/daily). Vercel Cron sends it as "Authorization: Bearer <CRON_SECRET>".
+    // Unset: the cron route answers 503 and reports/alerts still catch up when someone opens the dashboard.
+    cronSecret: env.CRON_SECRET || null,
   };
   if (cfg.publicOrigin && !/^https?:\/\/[^/\s]+$/.test(cfg.publicOrigin)) throw new Error('PUBLIC_ORIGIN must look like https://audit.example.com (no path, no trailing slash)');
   // A bare host only: no user:password@, query (?authToken=…), path or fragment, so the token can only come from its own variable.
   if (dbUrl && !/^(libsql|https|wss):\/\/[A-Za-z0-9.-]+(:\d{1,5})?\/?$/.test(dbUrl)) throw new Error(`${dbUrlName} must look like libsql://your-db-your-org.turso.io`);
+  if (cfg.cronSecret && cfg.cronSecret.length < 16) throw new Error('CRON_SECRET must be at least 16 characters (use a long random string)');
   if (dbUrl && !cfg.dbAuthToken) throw new Error(`DB_AUTH_TOKEN (or TURSO_AUTH_TOKEN) is required with ${dbUrlName}`);
   // Vercel's file system is read-only and wiped between requests: a local SQLite file would lose every record.
   if (onVercel && !dbUrl) throw new Error('A Turso database must be connected on Vercel (TURSO_DATABASE_URL + TURSO_AUTH_TOKEN from the Turso integration, or DB_URL + DB_AUTH_TOKEN)');

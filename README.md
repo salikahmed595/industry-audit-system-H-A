@@ -5,6 +5,7 @@ A root-cause dashboard for large textile groups. It has two parts:
 - A glassmorphism single-page dashboard (`index.html`, `css/`, `js/`).
 - A backend in `server/`. It handles sign-in, enforces the 8D corrective-action workflow, keeps a tamper-evident audit trail, and takes KPI readings from your ERP/MES.
 - **Ground-truth measurement.** Department staff enter shift, daily, event and month-end records on 16 forms. A different person approves each one, and every KPI is calculated only from approved records. A KPI without records shows **Not measured**, never a demo number. Gaps are explained with control charts, trend tests, Welch t-tests and Pareto analysis, and costed in PKR at finance's own cost rates. No AI model is involved: the calculations are deterministic and statistical.
+- **Automation, all inside this system (no e-mail, no outside automation service).** One daily job (`npm run cron`, or Vercel Cron) raises **alerts** for high and medium findings to the plant head and department manager who own them, writes the **CEO report summary** weekly or every two weeks, and tidies usage data. Findings are **quantified** in PKR at risk, cash tied up, hours lost and kg/lb of lost production, each with "How this was calculated". A **Usage & Costs** page shows LLM API spend per day, storage and audit cycles. **Read from photo** turns a photographed ledger or checklist into a pre-filled entry form with local Tesseract OCR.
 
 The backend uses Node.js built-ins plus one dependency, the official libSQL client (`@libsql/client`). The same SQLite engine runs as a local file in development and as a hosted **Turso** database on **Vercel**. It can run as a long-lived Node server or as a Vercel function.
 
@@ -12,8 +13,8 @@ The backend uses Node.js built-ins plus one dependency, the official libSQL clie
 
 ```powershell
 node --version          # needs 22.13 or newer
-npm install             # one dependency: @libsql/client
-npm test                # 332 tests: 227 unit + 105 integration (API, security, records, database, multi-instance, Vercel entry)
+npm install             # @libsql/client, plus tesseract.js and its English model for OCR
+npm test                # 373 tests: 241 unit + 132 integration (API, security, records, automation, database, multi-instance, Vercel entry)
 npm run user:create -- --username ayesha --name "Ayesha Khan" --role ceo --plant all
 npm run dev             # http://127.0.0.1:5174 using dev.env (database in data/dev.db)
 ```
@@ -86,6 +87,55 @@ This is the main way data gets in. Each department records what happened on the 
 
 The dashboard's **Measured** ring is the share of applicable KPIs that have approved data. Raise it by assigning each form to the department that owns it.
 
+## Automation: alerts, CEO reports, usage and OCR
+
+Everything below runs on this server and is shown in the admin panel. Nothing is e-mailed and no outside automation platform is involved.
+
+**The daily job.** One script does the scheduled work:
+
+```powershell
+npm run cron          # on the database in the environment (DB_PATH, or DB_URL / TURSO_*)
+npm run cron:remote   # on the hosted Turso database, using .env.turso
+```
+
+It sweeps the measured findings into alerts, writes the CEO report if one is due, removes usage data older than 400 days, prints one line of JSON and exits `1` on failure. It is safe to run more than once a day. Schedule it with the operating system: Task Scheduler on Windows, or `0 3 * * * cd /srv/textile-audit && npm run cron >> data/cron.log 2>&1` on Linux. On Vercel the same job runs from the `crons` entry in `vercel.json` (daily at 03:00 UTC), which calls `/api/cron/daily` with `CRON_SECRET`. If the job is missed, nothing is lost: alerts are swept, and a due report is written, the next time someone opens the dashboard.
+
+**Quantified findings.** Every measured finding carries PKR at risk per 30 days, plus cash tied up, hours lost and kg/lb of lost production where the KPI has them. Each comes with **How this was calculated**, which spells out the arithmetic. Money uses finance's approved **Cost rates** record: cotton, yarn, fabric and chemical PKR/kg, machine PKR/hour, output kg/hour and margin. Totals count overlapping KPIs once (spinning waste and yarn yield measure the same lost fibre).
+
+**Alerts** (*Act → Alerts*). A KPI in the red zone raises a **high** alert and one in the amber zone a **medium** alert, per plant.
+- **Who sees them:** the CEO, finance and admin see all alerts. A plant head sees their plant, and a department manager sees their department in their plant. Operators see none.
+- **How an alert changes:**
+  - **Updates** when new approved records change the numbers.
+  - **Escalates and reopens** if it worsens from medium to high.
+  - **Resolves itself** when the KPI is back on target.
+- **Acknowledging** an alert writes it to the audit log. The navigation badge and a sign-in notice show how many are open.
+
+**CEO reports** (*Admin → CEO Reports*, for the CEO, finance and admin).
+- **Contents:**
+  - KPI coverage, the off-target findings and their PKR, hours and kg over the same rolling 30 days as the dashboard.
+  - Open and raised alerts, corrective actions by stage, and record activity in the report period.
+  - The change since the previous report.
+- **Schedule:** weekly (the default) or every two weeks, or off. The CEO or admin sets it, and every change is audited.
+- **Generate now** adds an on-demand report. **Print or save as PDF** uses the browser's print.
+
+**Usage & Costs** (*Admin → Usage & Costs*).
+- **LLM API cost per day:** $0.00 today, because no external AI is called. A future call is logged with `usage.log('llm', { costUsd })`.
+- **Storage** by kind: data, audit files (photos and the audit log), reports, computations and system.
+- **Audit cycles per day:** count, and average and 95th-percentile time, split into gathering and computing.
+- **From data gathering to final computation:** the time from a record being entered to it being approved or rejected, then the computation.
+
+**Read from photo** (*Data Entry*). Photograph a shift sheet, ledger page or checklist.
+- **Where it runs:** on this server (Tesseract via `tesseract.js`, English model bundled from npm, no fee and no outside service).
+- **What it fills:** values whose labels match the form's fields. Values outside a field's range are listed instead of filled.
+- **Safeguards:** the person checks every highlighted value and submits, and a second person still approves. OCR never creates a record by itself.
+- **Limits:** PNG, JPEG or WebP, up to 2.5 MB. The browser shrinks larger phone photos.
+- **Evidence:** the photo and its text are kept as audit evidence, visible to the uploader, that form's reviewers in the plant, and the CEO, finance and admin.
+
+**Other industries.** Alerts, reports, usage tracking and OCR read only the generic catalogue in `js/measure.js`.
+- **To adapt it:** define that industry's data-entry forms (`FORMS`, field labels, ranges and units), its KPIs and targets, and a `QUANT` entry per KPI.
+- **What a `QUANT` entry says:** which volume field the gap applies to, and which cost rate prices it.
+- **What changes:** only those data tables. The alert routing, report, cron job and OCR label matching need no code changes.
+
 ## Sending real KPI data (machine feeds)
 
 Create an `integration` user for each feed. The feed signs in, then posts batches of 1–500 readings:
@@ -119,6 +169,14 @@ POST /api/kpis/ingest      {"source":"SAP ERP","records":[
 | `GET /api/measured?plant=all\|FSD\|KHI\|LHR\|GRP&period=m\|q\|y` | ceo, plant, dept, finance, admin | KPIs, coverage and ranked findings with evidence, from approved records only. Plant-scoped users default to their own plant; any other plant gets `403` |
 | `GET /api/kpis` | ceo, plant, dept, finance, admin | latest feed values |
 | `POST /api/kpis/ingest` | integration, admin | see above |
+| `GET /api/alerts?status=open\|all` | ceo, plant, dept, finance, admin | alerts the user owns (see Automation) and `counts {high, medium}` |
+| `POST /api/alerts/:id/ack` | same | `404` for an alert the user cannot see, `409` if it already resolved |
+| `GET /api/reports` · `GET /api/reports/:id` | ceo, finance, admin | list (writes a due report first), schedule and next due date · one report with its summary |
+| `POST /api/reports` · `POST /api/reports/schedule` | ceo, admin | generate now (`201`) · `{schedule: weekly\|biweekly\|off}` |
+| `GET /api/usage?days=1-365` | ceo, finance, admin | LLM cost per day, storage by kind, audit cycles, OCR runs, record lead time |
+| `POST /api/ocr` | roles with forms | `{form, plant?, image: base64}` (PNG/JPEG/WebP, at most 2.5 MB) → text, confidence and values to pre-fill; `415` other file types, `413` too large |
+| `GET /api/documents/:id/image` | uploader, that form's reviewers in the plant, ceo, finance, admin | the stored photo; `404` for anyone else |
+| `GET\|POST /api/cron/daily` | `Authorization: Bearer <CRON_SECRET>` | the daily job; `401` wrong secret, `503` when `CRON_SECRET` is not set |
 | `GET /api/health` (also `/healthz`) | anyone | `{"ok":true,"db":true}`, or `503` if the database is unreachable |
 
 All writes need `Content-Type: application/json`. Browser requests must come from `PUBLIC_ORIGIN`.
@@ -135,6 +193,7 @@ Vercel serves the dashboard from its CDN and runs the API as a function (`api/in
    | `PUBLIC_ORIGIN` | users reach the site through another address, e.g. a custom domain that is not the project's production domain |
    | `TRUST_PROXY` | `false` if you put another proxy or CDN such as Cloudflare in front of Vercel; otherwise every visitor shares that proxy's sign-in limit |
    | `DB_URL` + `DB_AUTH_TOKEN` | you created the Turso database yourself instead of through the integration (they win over the `TURSO_*` names) |
+   | `CRON_SECRET` | **to switch on the daily job**: a random string of at least 16 characters, for example from `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`. Vercel Cron sends it automatically. Without it `/api/cron/daily` answers `503`, and alerts and reports only catch up when someone opens the dashboard |
 
 3. **Deploy.** Push to the GitHub repository connected to Vercel, or press *Redeploy*. `vercel.json` already sets the build (`node scripts/build-static.js` → `public/`), the `/api/*` rewrite and the security headers. On its first request the API creates all the tables in Turso. If you deploy with the `vercel` CLI from this folder instead, `.vercelignore` keeps `data/`, `.env*`, tests and docs out of the upload.
 4. **Create the first users** from your own computer, against the Turso database. Copy the two values (Vercel → Storage → your Turso database → *.env.local* tab, or the Turso dashboard) into a file named `.env.turso` in the project folder. It is gitignored; never commit it.
@@ -159,6 +218,7 @@ Vercel serves the dashboard from its CDN and runs the API as a function (`api/in
 Things to know before relying on it:
 - **Vercel's free Hobby plan is for non-commercial use only** under Vercel's terms. A company's internal tool may count as commercial, which needs Vercel Pro. Turso's free plan has storage and monthly row-read/write limits; check turso.tech/pricing.
 - **Backups:** Turso keeps point-in-time history on its plans. For your own copies, use `turso db shell textile-audit .dump > backup.sql` regularly and keep them off Vercel.
+- **Cron and OCR on Vercel:** the Hobby plan runs a cron job at most once a day, which is all this needs. `vercel.json` gives the API function up to 60 seconds and bundles the OCR model with it. The first photo after a cold start also loads the model, so it takes a few seconds longer. Running cron and OCR on Vercel has not been verified yet; it needs a deployment.
 - **Latency:** every API call talks to Turso over the network, and a write takes a few round trips. Keep the database and the functions in one region (step 1). A write transaction that takes longer than 10 seconds (a stalled connection) is rolled back and the user sees an error, instead of blocking every other writer.
 
 ## Production deployment (your own server)
@@ -195,6 +255,8 @@ Keep backups off the server. Test a restore. After restoring, sign in as CEO and
 - **Shared forms (defect tally, downtime event) are not tied to the enterer's department.** That is deliberate: maintenance and quality staff log events for every area. The approver still has to be allowed to review that form in that plant.
 - **Measured findings are statistical evidence, not proof of cause.** A control-chart signal or a significant stratum tells you where to look; the 8D root-cause step still needs a person to confirm it.
 - **Records older than 62–100 days** (by form) cannot be entered through the API, so a late month-end needs an administrator.
+- **OCR reads printed and clear handwritten English.** Its accuracy on smudged, angled or cursive ledgers has not been measured, and Urdu is not supported yet (it needs the `urd` Tesseract model). That is why OCR only pre-fills and a person checks every value. Each server instance reads one photo at a time.
+- **Reports and alerts are measured over the rolling 30 days** whatever the dashboard's period filter is, so they agree with each other.
 - **Load testing has not been run.** See `docs/qa/quality-report.md`.
 
 ## Project layout
@@ -210,10 +272,14 @@ server/measured.js          KPIs from approved records
 server/{actions,audit,kpis,users,security,db,http,config}.js
 server/db.js                async libSQL adapter: local SQLite file or Turso, migrations, transactions
 server/cli/users.js         user administration (npm run user:remote uses .env.turso)
+server/cli/cron.js          the daily job: alert sweep, due CEO report, usage pruning (npm run cron)
+server/{alerts,reports,usage}.js  in-app alerts, CEO report summaries, usage and cost tracking
+server/{ocr,ocr-parse}.js   local Tesseract OCR and matching of the text to form fields
 api/index.js                Vercel function entry (all /api/* requests)
 scripts/build-static.js     copies the dashboard into public/ for Vercel's CDN
 vercel.json                 Vercel build, rewrite and security headers
 .vercelignore               keeps data/, .env*, tests and docs out of a `vercel` CLI upload
 tests/unit, tests/integration
+tests/e2e/demo-server.mjs   disposable server with synthetic users and records for browser checks
 docs/qa/quality-report.md   what was tested and what is still open
 ```
